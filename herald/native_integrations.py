@@ -97,7 +97,7 @@ def native_integration_spec(
             "config": {"command": [sys.executable, "-m", "herald.native_mcp", "--root", root_path], "timeout": 600},
             "description": f"Herald Bash/PowerShell command server rooted at {root_path}",
             "tags": ["native", "shell", "bash", "powershell", "mcp"],
-            "package_name": "herald-native-shell", "version": "0.4.0",
+            "package_name": "herald-native-shell", "version": "0.4.1",
             "source": {"type": "herald-native"},
         }
     if kind == "github":

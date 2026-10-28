@@ -102,6 +102,11 @@ mcp_app.add_typer(mcp_group_app, name="group")
 mcp_app.add_typer(mcp_native_app, name="native")
 app.add_typer(mcp_app, name="mcp")
 console = Console()
+G4F_NOTICE = (
+    "G4F is a gray area: it reaches providers through their websites rather than their official APIs, which "
+    "can go against a provider's terms. A provider may limit, block or ban an account used this way, and we "
+    "aren't responsible if that happens. Use it at your own risk."
+)
 
 
 @decisions_app.command("providers")
@@ -1245,6 +1250,7 @@ def capture_start(
 ):
     """Watch a real ChatGPT message and securely refresh one G4F account."""
     _ensure_router()
+    rprint(f"[yellow]{G4F_NOTICE}[/yellow]")
     result = _client().start_g4f_capture(account, timeout=timeout)
     if "error" in result:
         rprint(f"[red][X][/red] {result['error']}")

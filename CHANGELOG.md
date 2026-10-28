@@ -4,6 +4,11 @@ All notable changes, architectural updates, and breaking risk warnings for Heral
 
 ---
 
+## [0.4.1] - 2026-10-28
+
+- G4F accounts are now clearly marked as a gray area in the README, the Router dashboard's capture section and
+  `herald capture start`: a provider may limit, block or ban an account used this way, at the user's own risk.
+
 ## [0.4.0] - 2026-10-28
 
 - **License:** Herald is now licensed under the GNU Affero General Public License v3.0 or later

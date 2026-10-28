@@ -129,7 +129,7 @@ def build_server(
 ) -> Server:
     """Build a dynamic MCP proxy for one resolved Herald access context."""
     server = GatewayServer(
-        "herald-mcp-gateway", version="0.4.0",
+        "herald-mcp-gateway", version="0.4.1",
         instructions="Tools are selected by Herald MCP groups and scope bindings. Assistant schedule tools are restricted to this gateway's project and part.",
     )
     inherited_parent = os.environ.get("HERALD_ASSISTANT_PARENT_ID")

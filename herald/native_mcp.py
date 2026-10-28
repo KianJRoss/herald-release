@@ -78,7 +78,7 @@ def _shell_command(shell: str, command: str) -> list[str]:
 def build_server(root: Path) -> Server:
     root = root.resolve()
     server = Server(
-        "herald-native-shell", version="0.4.0",
+        "herald-native-shell", version="0.4.1",
         instructions=f"Command execution rooted at {root}. This is an execution tool, not an OS sandbox.",
     )
 
