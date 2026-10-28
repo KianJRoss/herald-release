@@ -263,6 +263,10 @@ secrets. The dashboard can register the pinned MIT-licensed
 `kapture-mcp@2.6.1` bridge as a global tool. Kapture provides shared Chromium
 tab control and network request/body capture on port `61822`.
 
+> **G4F accounts are a gray area.** G4F reaches providers through their websites rather than their
+> official APIs, which can go against a provider's terms. A provider may limit, block or ban an account
+> used this way, and the Herald maintainers aren't responsible if that happens. Use it at your own risk.
+
 Herald includes a provider-specific, no-model G4F capture path. It watches a
 real ChatGPT conversation request through Kapture, requires both the bearer
 and Sentinel proof fields, verifies the token's masked identity hint against
