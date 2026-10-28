@@ -7,10 +7,13 @@ user account running Herald.
 
 ## Supported versions
 
-Until the first public release, only the current `main` branch receives
-security fixes. After release, the latest published minor version will be
-supported. Older prerelease builds should be upgraded before reporting a
-problem.
+Security fixes go into the latest published release. Please upgrade to it and
+check the problem still happens before reporting.
+
+| Version | Supported |
+| --- | --- |
+| Latest 0.4.x | Yes |
+| 0.3.x and older | No |
 
 ## Reporting a vulnerability
 
@@ -41,6 +44,5 @@ an acknowledgement within seven days.
 - Use `HERALD_MAX_VOICE_UPLOAD_BYTES` to lower the default 25 MiB audio limit
   when appropriate.
 
-See [the deployment guide](docs/DEPLOYMENT_GUIDE.md) and the current
-[security review](docs/SECURITY_REVIEW_2026-08-26.md) before exposing Herald to
+See [the deployment guide](docs/DEPLOYMENT_GUIDE.md) before exposing Herald to
 another device.

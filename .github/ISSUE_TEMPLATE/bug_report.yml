@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in Herald doesn't work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Security problems go through the private process in SECURITY.md, not an issue.
+        Remove API keys, tokens, account identifiers, private prompts and local paths before posting.
+  - type: input
+    id: version
+    attributes:
+      label: Herald version
+      placeholder: e.g. 0.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part of Herald
+      options: [Router, CLI / Pi interface, Python package, TypeScript SDK, Installer, Other]
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system, Python and Node versions
+      placeholder: e.g. Windows 11, Python 3.13, Node 22
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest steps or code that show the problem.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Relevant error text, redacted.
+      render: text

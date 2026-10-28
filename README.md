@@ -1,5 +1,10 @@
 # Herald
 
+[![Latest release](https://img.shields.io/github/v/release/KianJRoss/herald-release?label=release)](https://github.com/KianJRoss/herald-release/releases/latest)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
 Herald gives every AI model and tool you already use one dependable front
 door. Connect hosted APIs, local models, browser sessions, MCP servers, and
 coding CLIs such as Claude Code and Codex; Herald handles selection, policy,
@@ -79,12 +84,10 @@ connection health, usage, and orchestration flows.
   automation.
 - [Embed the Package](docs/PACKAGE.md) for helpers, durable decisions, and
   application integration.
-- [Prepare a public release](docs/PUBLICATION_ROADMAP.md) with the complete
-  security, registry, automation, and rollout gates.
-- [Follow the development guidelines](docs/DEVELOPMENT_GUIDELINES.md) and
-  [publishing policy](docs/PUBLISHING_POLICY.md) for future changes.
-- [Explore the public Python API](docs/PUBLIC_API.md) or the
+- [Explore the public Python API](docs/PUBLIC_API.md), the
+  [simple AI helpers](docs/SIMPLE_AI_HELPERS.md) or the
   [component reference](docs/COMPONENTS_REFERENCE.md).
+- Run the [examples](examples) against your Router.
 
 ## Accounts and model lanes
 

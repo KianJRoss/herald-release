@@ -1,0 +1,42 @@
+version: 1
+name: feature-development
+mode: efficiency
+
+# Agent identity and memory are independent. These could use the same model
+# with different memory names, or entirely different account/model lanes.
+agents:
+  Director:
+    model: auto
+    memory: director
+    tools: true
+  Researcher:
+    model: g4f-gateway
+    memory: research
+    tools: true
+  Reviewer:
+    model: auto
+    memory: review
+    tools: true
+
+# Topology is read first. Lists in one stage execute concurrently.
+flow:
+  - Director
+  - [Researcher, Reviewer]
+  - from: [Researcher, Reviewer]
+    to: Director
+  - output
+
+# Behavior stays separate from topology and can be edited independently.
+rules:
+  Director: |
+    Own the plan, combine evidence, and return an actionable final result.
+  Researcher: |
+    Investigate the project and return concise evidence. Do not make final decisions.
+  Reviewer: |
+    Look for defects, missing tests, and incorrect assumptions.
+
+limits:
+  max_depth: 2
+  max_parallel: 4
+  max_model_calls: 8
+  max_tool_calls: 12

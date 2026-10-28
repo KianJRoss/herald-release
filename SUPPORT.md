@@ -2,7 +2,7 @@
 
 Herald is currently beta software.
 
-- Use GitHub Discussions for setup help, architecture questions, and ideas.
+- Use GitHub Issues for setup help and questions too; there's an issue form for each.
 - Use GitHub Issues for reproducible bugs and scoped feature requests.
 - Use the private process in [SECURITY.md](SECURITY.md) for vulnerabilities.
 
