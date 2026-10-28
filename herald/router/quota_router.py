@@ -14,6 +14,16 @@ from herald.router import cli_usage, quota_tracker
 from herald.router.registry import Backend
 
 
+def _registered_ending(suffix: str) -> set[str]:
+    """Registered backend names ending with `suffix` (a user's own "<name>-codex-primary"); empty if the
+    registry can't be read."""
+    try:
+        from herald.router.registry import Registry
+        return {backend.name for backend in Registry().list_all() if backend.name.endswith(suffix)}
+    except Exception:  # noqa: BLE001 - quota demotion is best effort
+        return set()
+
+
 def get_exhausted_backend_names(usage_data: list[dict[str, Any]] | None = None) -> set[str]:
     """Return set of backend names currently rate-limited or locked out before reset.
 
@@ -58,7 +68,7 @@ def get_exhausted_backend_names(usage_data: list[dict[str, Any]] | None = None) 
                                     demoted.add("codex-backup")
                                 else:
                                     demoted.add("codex-primary")
-                                    demoted.add("personal-codex-primary")
+                                    demoted.update(_registered_ending("-codex-primary"))
                             elif (
                                 "antigravity" in cli_name
                                 or source == "agy_usage_command"

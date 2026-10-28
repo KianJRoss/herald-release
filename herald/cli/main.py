@@ -80,6 +80,8 @@ history_app = typer.Typer(help="Search prompt and response history across stored
 terminal_app = typer.Typer(help="Render and manage secure persistent ttyd/tmux terminals.", no_args_is_help=True)
 admin_app = typer.Typer(help="Review, approve, or deny autonomous Admin work.", no_args_is_help=True)
 device_app = typer.Typer(help="Discover, approve, and manage other Herald nodes on the LAN.", no_args_is_help=True)
+omarchy_app = typer.Typer(help="Herald in Omarchy: its AI usage panel.", no_args_is_help=True)
+decisions_app = typer.Typer(help="Configure decision providers using local secret references.", no_args_is_help=True)
 app.add_typer(tool_app, name="tool")
 app.add_typer(account_app, name="account")
 app.add_typer(flow_app, name="flow")
@@ -94,10 +96,77 @@ app.add_typer(history_app, name="history")
 app.add_typer(terminal_app, name="terminal")
 app.add_typer(admin_app, name="admin")
 app.add_typer(device_app, name="devices")
+app.add_typer(omarchy_app, name="omarchy")
+app.add_typer(decisions_app, name="decisions")
 mcp_app.add_typer(mcp_group_app, name="group")
 mcp_app.add_typer(mcp_native_app, name="native")
 app.add_typer(mcp_app, name="mcp")
 console = Console()
+
+
+@decisions_app.command("providers")
+def decision_providers():
+    """List the connected Router's configured decision providers."""
+    providers = _client().list_decision_providers()
+    if not providers:
+        console.print("No decision providers configured. Use herald decisions configure <file.json>.")
+        return
+    table = Table("Name", "Type", "Model", "Enabled", "Default", title="Decision providers")
+    for provider in providers:
+        table.add_row(Text(str(provider["name"])), Text(str(provider["provider_type"])),
+                      Text(str(provider["model"])), str(provider["enabled"]), str(provider["is_default"]))
+    console.print(table)
+
+
+@decisions_app.command("configure")
+def configure_decisions(specification: Path = typer.Argument(..., exists=True, dir_okay=False)):
+    """Create or replace a provider from JSON; credentials must be secret_ref values."""
+    try:
+        spec = json.loads(specification.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            raise ValueError("Provider specification must be an object")
+        result = _client().configure_decision_provider(**spec)
+    except (OSError, ValueError, TypeError):
+        console.print("Invalid provider specification. See docs/DECISION_PROVIDERS.md.")
+        raise typer.Exit(1) from None
+    if result.get("error"):
+        console.print(Text("Provider could not be configured: " + str(result["error"])))
+        raise typer.Exit(1)
+    console.print(Text("Configured decision provider: " + spec["name"]))
+
+
+@decisions_app.command("remove")
+def remove_decision_provider(name: str):
+    """Remove a configured provider; its historical usage remains."""
+    result = _client().delete_decision_provider(name)
+    if result.get("error"):
+        console.print(Text(str(result["error"])))
+        raise typer.Exit(1)
+    console.print(Text("Removed decision provider: " + name))
+
+
+
+@omarchy_app.command(name="usage")
+def omarchy_usage(write: bool = typer.Option(False, "--write", help="Write the record where Omarchy's agents panel reads it")):
+    """Herald's subscription limits as an Omarchy usage record (print it, or --write it for the panel)."""
+    from herald import omarchy
+    key = os.environ.get("HERALD_API_KEY")
+    response = httpx.get(f"{ROUTER_URL}/usage/cli", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=60)
+    response.raise_for_status()
+    value = omarchy.record(response.json())
+    if write:
+        rprint(f"[green][OK][/green] {len(value['limits'])} limits -> {omarchy.write(value)}")
+    else:
+        print(json.dumps(value, indent=2))
+
+
+@omarchy_app.command(name="name")
+def omarchy_name(account: str = typer.Argument(..., help="Account as Herald names it, e.g. codex-backup or antigravity-2"),
+                 label: str = typer.Argument("", help="Name to show in Omarchy's panel; omit to go back to the default")):
+    """Name an account in Omarchy's AI usage panel."""
+    from herald import omarchy
+    names = omarchy.set_name(account, label or None)
+    console.print(f"[OK] {account} -> {names.get(account, 'default name')}", markup=False)
 
 
 def _pending_admin_reviews() -> list[dict[str, Any]]:
@@ -823,6 +892,21 @@ def usage_report(
     else:
         header.append("Provider cost: not reported", style="dim")
     console.print(Panel(header, border_style="cyan", box=box.ROUNDED))
+
+    decision_rows = payload.get("decisions", {}).get("by_route", [])
+    if decision_rows:
+        d_table = Table(title="[bold cyan]Decision Routes[/bold cyan]", box=box.ROUNDED, header_style="bold cyan")
+        for column in ("Route", "Provider / Model", "Attempts", "Success", "Avg ms", "Tokens", "Known cost"):
+            d_table.add_column(column)
+        for row in decision_rows:
+            provider_model = " / ".join(filter(None, (row.get("provider"), row.get("model")))) or "-"
+            tokens = None if row.get("input_tokens") is None and row.get("output_tokens") is None else f"{_fmt_tok(row.get('input_tokens'))} -> {_fmt_tok(row.get('output_tokens'))}"
+            known_cost = "unknown" if row.get("cost_usd") is None else f"${row['cost_usd']:.6f}"
+            latency = "unknown" if row.get("avg_latency_ms") is None else f"{row['avg_latency_ms']:.1f}"
+            coverage = f" ({row.get('cost_known', 0)}/{row.get('attempts', 0)})" if row.get("cost_usd") is not None else ""
+            d_table.add_row(Text(str(row.get("route"))), Text(provider_model), str(row.get("attempts", 0)),
+                            str(row.get("successes", 0)), latency, tokens or "unknown", known_cost + coverage)
+        console.print(d_table)
 
     # 1. Routing Pools & Active Backends Table
     backends = payload.get("backends", [])

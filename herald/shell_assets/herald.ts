@@ -65,6 +65,143 @@ function post(path: string, body: Json = {}): Promise<any> {
   });
 }
 
+const assistantProject = process.env.HERALD_ASSISTANT_PROJECT || "ultimate-assistant";
+const assistantPart = process.env.HERALD_ASSISTANT_PART || "assistant";
+const assistantBaseUrl = `${routerUrl}/nodes/main/http`;
+let _assistantAppToken: string | null = null;
+let _activeAssistantConversationId: string | null = null;
+
+async function getAssistantToken(forceRefresh = false): Promise<string> {
+  if (_assistantAppToken && !forceRefresh) return _assistantAppToken;
+  const headers = new Headers();
+  if (routerApiKey) headers.set("authorization", `Bearer ${routerApiKey}`);
+  const response = await fetch(`${assistantBaseUrl}/`, { headers });
+  if (!response.ok) {
+    throw new Error(`Ultimate Assistant main node unreachable (HTTP ${response.status})`);
+  }
+  const html = await response.text();
+  const match = html.match(/name=["']app-token["']\s+content=["']([^"']+)["']/i)
+    || html.match(/content=["']([^"']+)["']\s+name=["']app-token["']/i);
+  if (!match?.[1]) {
+    throw new Error("Could not extract app-token from Ultimate Assistant main node");
+  }
+  _assistantAppToken = match[1];
+  return _assistantAppToken;
+}
+
+async function assistantRequest(path: string, init?: RequestInit): Promise<any> {
+  for (const force of [false, true]) {
+    const token = await getAssistantToken(force);
+    const headers = new Headers(init?.headers);
+    if (routerApiKey) headers.set("authorization", `Bearer ${routerApiKey}`);
+    headers.set("x-ultimate-assistant-token", token);
+    headers.set("x-assistant-token", token);
+    const response = await fetch(`${assistantBaseUrl}${path}`, { ...init, headers });
+    if ((response.status === 401 || response.status === 403) && !force) {
+      continue;
+    }
+    const text = await response.text();
+    let body: any = {};
+    try { body = text ? JSON.parse(text) : {}; } catch { body = { error: text }; }
+    if (!response.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : body.error;
+      throw new Error(detail || `Ultimate Assistant returned HTTP ${response.status}`);
+    }
+    return body;
+  }
+}
+
+function assistantPost(path: string, body: Json = {}, init?: RequestInit): Promise<any> {
+  return assistantRequest(path, {
+    ...init,
+    method: "POST",
+    headers: { "content-type": "application/json", ...(init?.headers as any) },
+    body: JSON.stringify(body),
+  });
+}
+
+async function assistantChat(
+  message: string,
+  options: { conversationId?: string; agent?: string; interfaceName?: string; signal?: AbortSignal; onProgress?: (label: string) => void } = {},
+): Promise<{ reply: string; model: string; agent: string; conversation_id: string }> {
+  const token = await getAssistantToken();
+  const headers = new Headers({
+    "content-type": "application/json",
+    "x-ultimate-assistant-token": token,
+    "x-assistant-token": token,
+  });
+  if (routerApiKey) headers.set("authorization", `Bearer ${routerApiKey}`);
+  const payload: Json = {
+    message,
+    interface: options.interfaceName || "herald-pi",
+  };
+  if (options.conversationId || _activeAssistantConversationId) {
+    payload.conversation_id = options.conversationId || _activeAssistantConversationId;
+  }
+  if (options.agent && options.agent !== "auto") {
+    payload.agent = options.agent;
+  }
+  const response = await fetch(`${routerUrl}/nodes/main/http/api/chat`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal: options.signal,
+  });
+  if (!response.ok || !response.body) {
+    const errText = await response.text();
+    throw new Error(errText || `Ultimate Assistant chat HTTP ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "";
+  let dataLines: string[] = [];
+  let completed: any = null;
+
+  const flushFrame = () => {
+    if (!dataLines.length) return;
+    const raw = dataLines.join("\n");
+    dataLines = [];
+    const evt = currentEvent;
+    currentEvent = "";
+    let parsed: any = raw;
+    try { parsed = JSON.parse(raw); } catch { /* keep raw */ }
+    if (evt === "ack" && parsed?.text) {
+      options.onProgress?.(String(parsed.text));
+    } else if (evt === "progress" && parsed?.label) {
+      options.onProgress?.(String(parsed.label));
+    } else if (evt === "conversation" && parsed?.conversation_id) {
+      _activeAssistantConversationId = String(parsed.conversation_id);
+    } else if (evt === "complete") {
+      if (parsed?.conversation_id) _activeAssistantConversationId = String(parsed.conversation_id);
+      completed = parsed;
+    } else if (evt === "error") {
+      throw new Error(typeof parsed === "string" ? parsed : JSON.stringify(parsed));
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, idx).replace(/\r$/, "");
+      buffer = buffer.slice(idx + 1);
+      if (line.startsWith("event:")) {
+        currentEvent = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      } else if (line === "") {
+        flushFrame();
+      }
+    }
+  }
+  if (dataLines.length) flushFrame();
+  if (!completed) throw new Error("Ultimate Assistant stream ended without completion");
+  return completed;
+}
+
 function scopeQuery(): string {
   return project && part
     ? `?project=${encodeURIComponent(project)}&part=${encodeURIComponent(part)}`
@@ -678,20 +815,82 @@ export default async function heraldExtension(pi: ExtensionAPI) {
     },
   });
 
-  try {
-    const toolPayload = await request(`/tools${scopeQuery()}`);
-    for (const tool of toolPayload.tools || []) {
+  pi.registerTool({
+    name: "herald_assistant_agent",
+    label: "Ultimate Assistant · agent",
+    description: "Run a task through Ultimate Assistant's backend on the main node. Use agent='auto' for full multi-agent dispatch with shared conversation/memory/skills, or name a specialist: companion, operator, builder, researcher, tutor, planner.",
+    parameters: Type.Object({
+      agent: Type.Optional(Type.String({ description: "auto (default) or specialist: companion, operator, builder, researcher, tutor, planner" })),
+      task: Type.String({ description: "Task or message for Ultimate Assistant" }),
+      context: Type.Optional(Type.String({ description: "Optional extra context when running a specialist directly" })),
+      deliver: Type.Optional(Type.String({ description: "none (default), conversation, or notify" })),
+    }),
+    async execute(_id, params: any, signal: AbortSignal | undefined, onUpdate: any) {
+      const targetAgent = String(params.agent || "auto").trim().toLowerCase();
+      const taskText = String(params.task || "").trim();
+      if (!taskText) throw new Error("task is required");
+      if (targetAgent === "auto") {
+        const res = await assistantChat(taskText, {
+          signal,
+          onProgress: (label) => onUpdate?.({ content: [{ type: "text", text: label }], details: { agent: "auto", status: label } }),
+        });
+        return {
+          content: [{ type: "text", text: res.reply }],
+          details: { agent: res.agent, model: res.model, conversation_id: res.conversation_id },
+        };
+      }
+      const res = await assistantPost("/api/agents/run", {
+        agent: targetAgent,
+        task: taskText,
+        context: String(params.context || ""),
+        deliver: String(params.deliver || "none"),
+      }, { signal });
+      return {
+        content: [{ type: "text", text: String(res.reply || "") }],
+        details: { agent: res.agent || targetAgent, model: res.model },
+      };
+    },
+    renderCall(args: any, theme: any) {
+      const target = args.agent || "auto";
+      return new Text(`${theme.fg("accent", theme.bold("◆ Ultimate Assistant"))}  ${theme.fg("muted", `${target} · ${clip(args.task, 60)}`)}`, 0, 0);
+    },
+    renderResult(result: any, { isPartial }: any, theme: any) {
+      if (isPartial) return new Text(theme.fg("warning", `◆ ${result.content?.[0]?.text || "Ultimate Assistant working…"}`), 0, 0);
+      const details = result.details || {};
+      return new Text(theme.fg("success", `◆ Ultimate Assistant [${details.agent || "done"}${details.model ? ` · ${details.model}` : ""}]`), 0, 0);
+    },
+  });
+
+  const registeredToolNames = new Set<string>();
+  const registerScopedTools = (tools: any[], scopeOverride: Record<string, string>) => {
+    for (const tool of tools || []) {
       const exposedName = `herald_${String(tool.name).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      if (registeredToolNames.has(exposedName)) continue;
+      registeredToolNames.add(exposedName);
       pi.registerTool({
         name: exposedName,
         label: `Herald MCP · ${tool.name}`,
         description: `${tool.description || "Herald registered tool"} [${tool.package || tool.instance}@${tool.version || "unversioned"}]`,
         parameters: Type.Unsafe(tool.input_schema || { type: "object", properties: {} }),
         async execute(_id, params: any) {
-          const result = await post("/tools/run", { name: tool.name, arguments: params || {}, ...scopeBody() });
+          const result = await post("/tools/run", { name: tool.name, arguments: params || {}, ...scopeOverride });
           return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
         },
       });
+    }
+  };
+
+  try {
+    const toolPayload = await request(`/tools${scopeQuery()}`);
+    registerScopedTools(toolPayload.tools || [], scopeBody());
+    if (!project && !part) {
+      try {
+        const uaQuery = `?project=${encodeURIComponent(assistantProject)}&part=${encodeURIComponent(assistantPart)}`;
+        const uaTools = await request(`/tools${uaQuery}`);
+        registerScopedTools(uaTools.tools || [], { project: assistantProject, part: assistantPart });
+      } catch {
+        // Best-effort: Ultimate Assistant scope is optional if not yet registered on this router
+      }
     }
   } catch {
     routerOnline = false;
@@ -766,6 +965,16 @@ export default async function heraldExtension(pi: ExtensionAPI) {
     "  /capability approve|deny ID Resolve a capability proposal",
     "  /events [topic]            Show sanitized router lifecycle events",
     "  /hooks [add|remove]        Inspect or manage event hooks",
+    "",
+    "ULTIMATE ASSISTANT & OMARCHY",
+    "  /assistant [status|ask|work] Ultimate Assistant status, active jobs, or full chat turn",
+    "  /agents [list|run A TASK]  Inspect or run specialist agents (operator, builder, etc.)",
+    "  /conversations [list|show] Browse or inspect cross-device Ultimate Assistant threads",
+    "  /tasks [list|add|done]     Manage Ultimate Assistant commitments and tasks",
+    "  /canvas [list|show|clear]  Inspect, pin, or clear live desktop overlay canvas cards",
+    "  /skills [list|recordings]  Inspect learned assistant skills and teach recordings",
+    "  /modules [list|enable|...] Manage Ultimate Assistant optional capability modules",
+    "  /omarchy [profile|ref|...] Omarchy Linux profile, keybindings, docs, changes & crashes",
     "",
     "SHELL",
     "  /appearance                Themes, holiday colors, syntax, and thinking display",
@@ -2215,6 +2424,381 @@ export default async function heraldExtension(pi: ExtensionAPI) {
     }),
   });
 
+  pi.registerCommand("assistant", {
+    description: "Ultimate Assistant main-node status, active background jobs, or full multi-agent chat turn",
+    getArgumentCompletions: async (prefix) => completion(["status", "ask", "work", "cancel"], prefix),
+    handler: async (args, ctx) => guarded("Ultimate Assistant", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "status";
+      if (sub === "status") {
+        const [agentsRes, convRes, tasksRes, memRes, canvasRes, modRes, workRes] = await Promise.all([
+          assistantRequest("/api/agents").catch(() => ({ agents: [] })),
+          assistantRequest("/api/conversations").catch(() => ({ conversations: [] })),
+          assistantRequest("/api/tasks").catch(() => ({ tasks: [] })),
+          assistantRequest("/api/memories").catch(() => ({ memories: [] })),
+          assistantRequest("/api/canvas").catch(() => ({ cards: [] })),
+          assistantRequest("/api/modules").catch(() => ({ modules: [] })),
+          assistantRequest("/api/assistant-work").catch(() => ({ jobs: [] })),
+        ]);
+        const agents = agentsRes.agents || [];
+        const convs = convRes.conversations || [];
+        const tasks = tasksRes.tasks || [];
+        const openTasks = tasks.filter((t: any) => t.status !== "done" && t.status !== "completed");
+        const memories = memRes.memories || [];
+        const cards = canvasRes.cards || [];
+        const modules = modRes.modules || [];
+        const jobs = (workRes.jobs || []).filter((j: any) => j.status === "running" || j.status === "queued");
+        show("Ultimate Assistant · Main Node", [
+          `● Main node      ${assistantBaseUrl}`,
+          `◆ Specialists    ${agents.map((a: any) => a.name).join(", ") || "none"}`,
+          `◆ Conversations  ${convs.length} shared thread(s)${_activeAssistantConversationId ? ` · active: ${_activeAssistantConversationId}` : ""}`,
+          `◆ Tasks          ${openTasks.length} open / ${tasks.length} total`,
+          `◆ Memories       ${memories.length} stored fact(s)`,
+          `◆ Canvas         ${cards.length} live overlay card(s)`,
+          `◆ Modules        ${modules.filter((m: any) => m.enabled).length}/${modules.length} enabled`,
+          `◆ Active work    ${jobs.length} running job(s)`,
+          "",
+          "Note: Voice (SUPER+A), Text (SUPER+ALT+A), Overlay Canvas, and Phone App remain the primary assistant interfaces.",
+          "Use `/assistant ask <prompt>` or `/agents run <specialist> <task>` to invoke Ultimate Assistant from Pi.",
+        ].join("\n"), "success");
+        return;
+      }
+      if (sub === "work") {
+        const workRes = await assistantRequest("/api/assistant-work");
+        const jobs = workRes.jobs || [];
+        if (!jobs.length) {
+          show("Ultimate Assistant · Active Work", "No background or active assistant jobs.");
+          return;
+        }
+        show("Ultimate Assistant · Active Work", renderTable(
+          [{ header: "Job ID" }, { header: "Status" }, { header: "Summary" }],
+          jobs.map((j: any) => [String(j.id || ""), String(j.status || ""), clip(String(j.summary || j.prompt || ""), 54)]),
+        ));
+        return;
+      }
+      if (sub === "cancel") {
+        const jobId = tokens[1];
+        if (!jobId) throw new Error("Usage: /assistant cancel <job_id>");
+        await assistantPost(`/api/assistant-work/${encodeURIComponent(jobId)}/cancel`, {});
+        show("Ultimate Assistant · Work Cancelled", jobId, "warning");
+        return;
+      }
+      const prompt = sub === "ask" ? args.trim().replace(/^ask\s+/i, "") : args.trim();
+      if (!prompt) throw new Error("Usage: /assistant [status|work|cancel <id>|ask <message>]");
+      ctx?.ui?.notify?.("Ultimate Assistant thinking…", "info");
+      const out = await assistantChat(prompt, {
+        onProgress: (stage) => {
+          ctx?.ui?.setWorkingMessage?.(`Ultimate Assistant: ${stage}`);
+        },
+      });
+      const meta = [
+        out.agent ? `agent: ${out.agent}` : "",
+        out.model ? `model: ${out.model}` : "",
+        out.conversation_id ? `conversation: ${out.conversation_id}` : "",
+      ].filter(Boolean).join(" · ");
+      show(`Ultimate Assistant${meta ? ` (${meta})` : ""}`, out.reply || (out as any).text || "(empty response)", "success");
+    }),
+  });
+
+  pi.registerCommand("agents", {
+    description: "Inspect or run Ultimate Assistant specialist agents (companion, operator, builder, researcher, tutor, planner)",
+    getArgumentCompletions: async (prefix) => completion(["list", "run"], prefix),
+    handler: async (args, ctx) => guarded("Specialist Agents", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "list";
+      if (sub === "run") {
+        const agentName = tokens[1];
+        const taskPrompt = args.trim().replace(/^run\s+\S+\s*/i, "");
+        if (!agentName || !taskPrompt) {
+          throw new Error("Usage: /agents run <companion|operator|builder|researcher|tutor|planner> <task>");
+        }
+        ctx?.ui?.notify?.(`Running Ultimate Assistant specialist '${agentName}'…`, "info");
+        const result = await assistantPost("/api/agents/run", {
+          agent: agentName,
+          task: taskPrompt,
+          conversation_id: _activeAssistantConversationId,
+        });
+        show(`Specialist · ${result.agent || agentName} (${result.model || "routed"})`, String(result.reply || result.text || JSON.stringify(result, null, 2)), result.ok === false ? "warning" : "success");
+        return;
+      }
+      const payload = await assistantRequest("/api/agents");
+      const agents = payload.agents || [];
+      show("Ultimate Assistant · Specialist Agents", renderTable(
+        [{ header: "Agent" }, { header: "Mode" }, { header: "Tools" }, { header: "Description" }],
+        agents.map((a: any) => [
+          String(a.name),
+          String(a.routing_mode || ""),
+          String((a.allowed_tools || []).length || "all"),
+          clip(String(a.description || ""), 48),
+        ]),
+      ));
+    }),
+  });
+
+  pi.registerCommand("conversations", {
+    description: "Browse, inspect, or switch shared Ultimate Assistant conversations",
+    getArgumentCompletions: async (prefix) => completion(["list", "show", "use", "delete"], prefix),
+    handler: async (args) => guarded("Assistant Conversations", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "list";
+      if (sub === "use") {
+        _activeAssistantConversationId = tokens[1] || null;
+        show("Assistant Conversation", _activeAssistantConversationId ? `Bound to conversation ${_activeAssistantConversationId}` : "Cleared active conversation binding (next turn starts fresh).", "success");
+        return;
+      }
+      if (sub === "show") {
+        const convId = tokens[1] || _activeAssistantConversationId;
+        if (!convId) throw new Error("Usage: /conversations show <conversation_id>");
+        const data = await assistantRequest(`/api/conversations/${encodeURIComponent(convId)}`);
+        const msgs = (data.messages || []).slice(-12).map((m: any) => `[${m.role}] ${clip(String(m.content || ""), 160)}`);
+        show(`Conversation · ${data.title || convId}`, msgs.join("\n\n") || "No messages");
+        return;
+      }
+      if (sub === "delete") {
+        const convId = tokens[1];
+        if (!convId) throw new Error("Usage: /conversations delete <conversation_id>");
+        await assistantRequest(`/api/conversations/${encodeURIComponent(convId)}`, { method: "DELETE" });
+        if (_activeAssistantConversationId === convId) _activeAssistantConversationId = null;
+        show("Conversation Deleted", convId, "warning");
+        return;
+      }
+      const payload = await assistantRequest("/api/conversations");
+      const convs = (payload.conversations || []).slice(0, 20);
+      show("Ultimate Assistant · Conversations", renderTable(
+        [{ header: "ID" }, { header: "Title" }, { header: "Updated" }],
+        convs.map((c: any) => [
+          `${c.id === _activeAssistantConversationId ? "● " : ""}${String(c.id)}`,
+          clip(String(c.title || "Untitled"), 44),
+          String(c.updated_at || "").slice(0, 19),
+        ]),
+      ));
+    }),
+  });
+
+  pi.registerCommand("tasks", {
+    description: "List, add, or complete Ultimate Assistant tasks and commitments",
+    getArgumentCompletions: async (prefix) => completion(["list", "add", "done"], prefix),
+    handler: async (args) => guarded("Assistant Tasks", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "list";
+      if (sub === "add") {
+        const title = args.trim().replace(/^add\s+/i, "");
+        if (!title) throw new Error("Usage: /tasks add <title>");
+        const created = await assistantPost("/api/tasks", { title });
+        show("Task Created", `${created.id || ""}  ${created.title || title}`, "success");
+        return;
+      }
+      if (sub === "done") {
+        const taskId = tokens[1];
+        if (!taskId) throw new Error("Usage: /tasks done <task_id>");
+        await assistantRequest(`/api/tasks/${encodeURIComponent(taskId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "done" }),
+        });
+        show("Task Completed", taskId, "success");
+        return;
+      }
+      const payload = await assistantRequest("/api/tasks");
+      const tasks = payload.tasks || [];
+      if (!tasks.length) {
+        show("Ultimate Assistant · Tasks", "No tasks in the commitment store.");
+        return;
+      }
+      show("Ultimate Assistant · Tasks", renderTable(
+        [{ header: "ID" }, { header: "Status" }, { header: "Title" }, { header: "Due" }],
+        tasks.slice(0, 25).map((t: any) => [
+          String(t.id),
+          String(t.status || "open"),
+          clip(String(t.title || ""), 44),
+          String(t.due_at || "—").slice(0, 16),
+        ]),
+      ));
+    }),
+  });
+
+  pi.registerCommand("canvas", {
+    description: "Inspect, pin, or clear live cards on the Ultimate Assistant desktop overlay canvas",
+    getArgumentCompletions: async (prefix) => completion(["list", "show", "clear"], prefix),
+    handler: async (args) => guarded("Assistant Canvas", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "list";
+      if (sub === "clear") {
+        await assistantRequest("/api/canvas", { method: "DELETE" });
+        show("Canvas Cleared", "Cleared all live cards from the Ultimate Assistant overlay canvas.", "success");
+        return;
+      }
+      if (sub === "show") {
+        const rest = args.trim().replace(/^show\s+/i, "");
+        const [rawTitle, ...bodyParts] = rest.split("|");
+        const title = (rawTitle || "Herald Pi Note").trim();
+        const body = (bodyParts.length ? bodyParts.join("|") : rest).trim();
+        if (!body) throw new Error("Usage: /canvas show <title> | <markdown body>");
+        await assistantPost("/api/canvas", { kind: "markdown", title, body });
+        show("Canvas Card Pinned", `${title}\n${body}`, "success");
+        return;
+      }
+      const payload = await assistantRequest("/api/canvas");
+      const cards = payload.cards || [];
+      if (!cards.length) {
+        show("Ultimate Assistant · Canvas", "No active cards on the desktop overlay canvas.");
+        return;
+      }
+      show("Ultimate Assistant · Canvas", cards.map((c: any) =>
+        `◆ [${c.kind || "card"}] ${c.title || c.id}\n  ${clip(String(c.body || JSON.stringify(c.data || {})), 120)}`
+      ).join("\n\n"));
+    }),
+  });
+
+  pi.registerCommand("skills", {
+    description: "List Ultimate Assistant learned skills and teach-mode recordings",
+    getArgumentCompletions: async (prefix) => completion(["list", "recordings"], prefix),
+    handler: async (args) => guarded("Assistant Skills", async () => {
+      const sub = words(args)[0] || "list";
+      if (sub === "recordings") {
+        const recPayload = await assistantRequest("/api/teach/recordings");
+        const recs = recPayload.recordings || [];
+        if (!recs.length) {
+          show("Teach Recordings", "No teach-mode recordings stored yet.");
+          return;
+        }
+        show("Teach Recordings", renderTable(
+          [{ header: "ID" }, { header: "Name" }, { header: "Events" }],
+          recs.map((r: any) => [String(r.id || ""), String(r.name || ""), String((r.events || []).length || r.event_count || 0)]),
+        ));
+        return;
+      }
+      const res = await post("/tools/run", {
+        name: "list_skills",
+        arguments: {},
+        project: assistantProject,
+        part: assistantPart,
+      });
+      const rawOut = res?.result?.structuredContent?.result ?? res?.result?.structuredContent ?? res?.result ?? res;
+      let out: any = rawOut;
+      if (typeof rawOut === "string") {
+        try { out = JSON.parse(rawOut); } catch { out = { skills: [] }; }
+      }
+      const skills = out?.skills || [];
+      if (!skills.length) {
+        show("Ultimate Assistant · Learned Skills", "No learned skills saved yet. Use `/skills recordings` to inspect teach-mode recordings.");
+        return;
+      }
+      show("Ultimate Assistant · Learned Skills", renderTable(
+        [{ header: "Name" }, { header: "Description" }, { header: "Steps" }],
+        skills.map((s: any) => [String(s.name || ""), clip(String(s.description || ""), 48), String((s.steps || []).length)]),
+      ));
+    }),
+  });
+
+  pi.registerCommand("modules", {
+    description: "Inspect or manage Ultimate Assistant optional capability modules",
+    getArgumentCompletions: async (prefix) => completion(["list", "install", "enable", "disable", "status"], prefix),
+    handler: async (args) => guarded("Assistant Modules", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "list";
+      if (["install", "enable", "disable", "status"].includes(sub)) {
+        const modId = tokens[1];
+        if (!modId) throw new Error(`Usage: /modules ${sub} <module_id>`);
+        const res = sub === "status"
+          ? await assistantRequest(`/api/modules/${encodeURIComponent(modId)}/status`)
+          : await assistantPost(`/api/modules/${encodeURIComponent(modId)}/${sub}`, {});
+        show(`Module · ${modId} (${sub})`, JSON.stringify(res, null, 2), "success");
+        return;
+      }
+      const payload = await assistantRequest("/api/modules");
+      const modules = payload.modules || [];
+      if (!modules.length) {
+        show("Ultimate Assistant · Modules", "No optional modules registered.");
+        return;
+      }
+      show("Ultimate Assistant · Modules", renderTable(
+        [{ header: "ID" }, { header: "Enabled" }, { header: "Installed" }, { header: "Description" }],
+        modules.map((m: any) => [
+          String(m.id || m.name),
+          boolMark(Boolean(m.enabled)),
+          boolMark(Boolean(m.installed)),
+          clip(String(m.description || ""), 46),
+        ]),
+      ));
+    }),
+  });
+
+  pi.registerCommand("omarchy", {
+    description: "Inspect and manage Omarchy Linux (profile, commands, keybindings, reference docs, changes, undo, crashes)",
+    getArgumentCompletions: async (prefix) => completion(["profile", "commands", "keybindings", "ref", "changes", "undo", "crashes"], prefix),
+    handler: async (args) => guarded("Omarchy Environment", async () => {
+      const tokens = words(args);
+      const sub = tokens[0] || "profile";
+      const rest = args.trim().slice(sub.length).trim();
+      const runEnvTool = async (toolName: string, toolArgs: Record<string, any> = {}) => {
+        const r = await post("/tools/run", {
+          name: toolName,
+          arguments: toolArgs,
+          project: assistantProject,
+          part: assistantPart,
+        });
+        const sc = r?.result?.structuredContent?.result ?? r?.result?.structuredContent ?? r?.result ?? r;
+        if (typeof sc === "string") {
+          try { return JSON.parse(sc); } catch { return { raw: sc }; }
+        }
+        return sc;
+      };
+      if (sub === "profile") {
+        // The omarchy module (Ultimate Assistant) carries the Omarchy profile; older backends kept it in environment_profile.
+        let prof = await runEnvTool("omarchy_profile").catch(() => null);
+        if (!prof || prof.error || prof.raw) prof = (await runEnvTool("environment_profile"))?.omarchy;
+        show("Omarchy · Live System Profile", JSON.stringify(prof, null, 2));
+        return;
+      }
+      if (sub === "commands") {
+        const cmds = await runEnvTool("omarchy_commands", { search: rest });
+        const list = (cmds.commands || []).map((c: any) => `${String(c.name || "").padEnd(34)} ${c.summary || ""}`);
+        show(`Omarchy Commands (${cmds.count || list.length})`, list.slice(0, 60).join("\n") || "No matching commands");
+        return;
+      }
+      if (sub === "keybindings" || sub === "keys") {
+        const kb = await runEnvTool("omarchy_keybindings", { search: rest });
+        const rows = kb.keybindings || kb.bindings || [];
+        const bindings = rows.map((b: any) =>
+          b.keys ? `${String(b.keys).padEnd(28)} ${b.description || ""}` : `[${b.source}] ${b.kind}: ${(b.args || []).join("  ")}`
+        );
+        show(`Omarchy Keybindings (${kb.count || bindings.length})`, bindings.slice(0, 60).join("\n") || "No matching keybindings");
+        return;
+      }
+      if (sub === "ref" || sub === "docs") {
+        const ref = await runEnvTool("omarchy_reference", { topic: rest });
+        const body = ref.content
+          || (Array.isArray(ref.files)
+            ? ref.files.map((f: any) => `### ${f.path}\n${f.content}`).join("\n\n")
+            : (ref.files && typeof ref.files === "object"
+              ? Object.entries(ref.files).map(([k, v]) => `### ${k}\n${v}`).join("\n\n")
+              : JSON.stringify(ref, null, 2)));
+        show(`Omarchy Reference${rest ? ` · ${rest}` : ""}`, body);
+        return;
+      }
+      if (sub === "changes") {
+        const ch = await runEnvTool("environment_changes", { limit: 20 });
+        const rows = ch.changes || [];
+        show("Omarchy · Backed-up Config Changes", renderTable(
+          [{ header: "ID" }, { header: "Action" }, { header: "Path" }, { header: "When" }],
+          rows.map((c: any) => [String(c.id), String(c.action || c.kind || ""), clip(String(c.path), 42), String(c.created_at || c.timestamp || "").slice(0, 19)]),
+        ));
+        return;
+      }
+      if (sub === "undo") {
+        const res = await runEnvTool("undo_environment_change", { change_id: rest });
+        show("Omarchy · Undo Config Change", JSON.stringify(res, null, 2), res.ok === false ? "error" : "success");
+        return;
+      }
+      if (sub === "crashes") {
+        const cr = await runEnvTool("diagnose_crashes", { target: rest, backtrace: Boolean(rest) });
+        show("Omarchy · Crash Diagnostics", JSON.stringify(cr, null, 2));
+        return;
+      }
+      throw new Error("Usage: /omarchy [profile|commands [q]|keybindings [q]|ref [topic]|changes|undo [id]|crashes [target]]");
+    }),
+  });
+
   pi.on("resources_discover", async () => ({
     themePaths: HERALD_THEME_FILES.map((name) => join(_extensionDir, name)),
   }));
@@ -2240,6 +2824,8 @@ export default async function heraldExtension(pi: ExtensionAPI) {
       "3. Remote Fleet & Server Operations: Check out and manage services, Docker containers, and systems on remote nodes in your network using SSH and network commands via bash.",
       "4. Unified Model Routing: Intelligently route requests across local models (LM Studio, Ollama), CLI subscriptions (Claude, Codex, Antigravity), cloud APIs, and browser sessions.",
       "5. Multi-Model Coordination: Coordinate multi-model workflows and task delegation via herald_delegate.",
+      "6. Ultimate Assistant Integration: You are connected to the user's Ultimate Assistant backend (`herald_assistant_agent` and shared MCP tools for memory, tasks, calendar, email, canvas, browser, skills, home, and desktop control). Ultimate Assistant's voice (SUPER+A), text (SUPER+ALT+A), overlay canvas, and phone app remain the user's primary daily assistant interfaces, while you (Herald Pi) serve as the power-user terminal/coding interface synchronized with the same backend.",
+      "7. Omarchy Linux Mastery (KianArch): When configuring or debugging the user's Arch + Hyprland 0.56 Lua + Quickshell desktop, ALWAYS respect Omarchy architecture: never edit `/usr/share/omarchy/` (read-only package files); edit `~/.config/hypr/*.lua`, `~/.config/omarchy/shell.json`, or `~/.config/omarchy/themes/<name>/` via `herald_write_environment_file` / `herald_edit_environment_file` (which create automatic rollback backups and run `hyprctl reload && hyprctl configerrors`). Use `herald_environment_profile`, `herald_omarchy_commands`, `herald_omarchy_keybindings`, `herald_omarchy_reference`, and `herald_diagnose_crashes` for authoritative inspection.",
       "",
       "OPERATIONAL & TOOL GUIDELINES:",
       "- TASK TRACKING CHECKLIST: On multi-step goals, complex refactors, or multi-phase coding tasks, ALWAYS call `herald_task_track` first to define your planned task checklist. As you complete each step, call `herald_task_track` with `status: \"completed\"` to visually check off progress for the user.",

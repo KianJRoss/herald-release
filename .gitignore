@@ -1,6 +1,33 @@
 __pycache__/
-*.pyc
-.venv/
-dist/
-build/
+*.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+node_modules/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+router.yaml
+
+# Runtime state
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+.herald_jobs/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*_report.txt
+.publication-private-markers

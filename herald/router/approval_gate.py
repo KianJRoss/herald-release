@@ -89,6 +89,29 @@ def classify_command_risk(command: str) -> str:
     return RISK_CONFIRM  # arbitrary shell execution is never SAFE by default
 
 
+DESTRUCTIVE_STATEMENT = (
+    "Running this shell command deletes, overwrites or truncates files or data, rewrites history, "
+    "kills or uninstalls something, or changes system settings, in a way that is hard to undo.")
+RAISE_CONFIDENT = 0.8
+
+
+def decision_model_raise(command: str, tier: str) -> str:
+    """Raise-only second opinion from the decision model on a command the patterns rated
+    REQUIRES_CONFIRMATION: DESTRUCTIVE when it is confident the command destroys something.
+    It never lowers a tier; with no decision model (or any failure) the pattern tier stands."""
+    if tier != RISK_CONFIRM or not command.strip():
+        return tier
+    try:
+        from herald.router import decisions
+        answers = decisions.decide(f"Shell command: {command[:2000]}",
+                                   {"destructive": {"type": "noul", "instructions": DESTRUCTIVE_STATEMENT}},
+                                   timeout=8.0)["answers"]
+        probability = float(answers["destructive"]["noul"])
+    except Exception:  # noqa: BLE001 - the patterns decide
+        return tier
+    return RISK_DESTRUCTIVE if probability >= RAISE_CONFIDENT else tier
+
+
 def classify_tool_call(tool_name: str, args: dict[str, Any]) -> str:
     """Best-effort risk classification for a coding_tools.py call.
     Documented as best-effort/pattern-based, not exhaustive."""
@@ -283,6 +306,11 @@ def gate_call(tool_name: str, args: dict[str, Any], *, preview: str = "") -> Non
     if not gating_enabled():
         _store.log(tool_name=tool_name, args=args, risk_tier=risk_tier, ceiling=ceiling, decision="auto_allowed_gating_off")
         return
+
+    if tool_name in ("run_command", "run_command_background"):
+        risk_tier = decision_model_raise(str(args.get("command", "")), risk_tier)
+    elif tool_name == "git_run":
+        risk_tier = decision_model_raise("git " + str(args.get("args", "")), risk_tier)
 
     if risk_tier in (RISK_SAFE, RISK_CONFIRM):
         _store.log(tool_name=tool_name, args=args, risk_tier=risk_tier, ceiling=ceiling, decision="auto_allowed")

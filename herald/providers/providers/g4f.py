@@ -3,7 +3,7 @@
 Routes requests through the g4f gateway (start_g4f.py) which multiplexes
 multiple browser-session-authenticated accounts behind one OpenAI-compatible
 endpoint.  Model names use the format "g4f-<account>/<underlying-model>",
-e.g. "g4f-burner1/gpt-4o".
+e.g. "g4f-account1/gpt-4o".
 
 The provider is purely additive — no existing provider is modified.  It is
 disabled unless G4F_GATEWAY_URL is set in the environment.

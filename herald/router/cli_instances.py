@@ -83,7 +83,7 @@ def forget_session(instance: str, session: str, cli: str) -> None:
 def _text(message: dict[str, Any]) -> str:
     content = message.get("content")
     if isinstance(content, list):
-        return "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        return "\n".join(("[Attached image]" if part.get("type") == "image_url" else str(part.get("text", ""))) for part in content if isinstance(part, dict))
     return str(content or "")
 
 

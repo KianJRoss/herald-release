@@ -54,7 +54,7 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from herald.router import cli_auth
 from herald.router import cli_usage
@@ -536,7 +536,7 @@ def _attempt_backend(backend, prompt: str, *, branch_id: str | None, depth: int 
             error=str(result.get("error") or "unknown failure")[:1000],
         )
         # Operator cancellation is not evidence that the provider is unhealthy.
-        if result.get("error_kind") != "cancelled":
+        if result.get("error_kind") not in {"cancelled", "unsupported_input"}:
             registry.record_failure(backend.name)
         telemetry.log_call(
             backend_name=backend.name, backend_type=backend.backend_type, prompt=prompt,
@@ -703,7 +703,7 @@ def _message_text(content: Any) -> str:
         parts = []
         for block in content:
             if isinstance(block, dict):
-                parts.append(str(block.get("text") or block.get("content") or ""))
+                parts.append("[Attached image]" if block.get("type") == "image_url" else str(block.get("text") or block.get("content") or ""))
         return "\n".join(part for part in parts if part)
     return "" if content is None else str(content)
 
@@ -1278,6 +1278,35 @@ def openai_list_models() -> dict[str, Any]:
 class DecisionRequest(BaseModel):
     state: Any
     questions: dict[str, Any]
+    provider: str | None = None
+    model: str | None = None
+    decision_name: str | None = None
+
+
+class DecisionProviderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    provider_type: str
+    url: str
+    model: str
+    secret_ref: str | None = None
+    enabled: bool = True
+    is_default: bool = False
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class DecisionUsageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision_name: str
+    route: str
+    provider: str | None = None
+    model: str | None = None
+    latency_ms: int | None = Field(default=None, strict=True)
+    input_tokens: int | None = Field(default=None, strict=True)
+    output_tokens: int | None = Field(default=None, strict=True)
+    cost_usd: float | None = None
+    status: str
+    fallback_reason: str | None = None
 
 
 @app.post("/v1/decide")
@@ -1285,15 +1314,65 @@ def http_decide(request: DecisionRequest) -> dict[str, Any]:
     """Typed answers from the decision model (see herald/router/decisions.py); 503 means fall back."""
     from herald.router import decisions
     try:
-        return decisions.decide(request.state, request.questions)
+        return decisions.decide(request.state, request.questions, provider=request.provider, model=request.model,
+                                decision_name=request.decision_name)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     except decisions.DecisionUnavailable as exc:
         raise HTTPException(503, str(exc)) from None
 
 
+@app.get("/v1/decision-providers")
+def list_decision_providers() -> dict[str, Any]:
+    from herald.router.decisions import registry as decision_registry
+    return {"providers": decision_registry.list()}
+
+
+@app.put("/v1/decision-providers/{name:path}")
+def configure_decision_provider(name: str, request: DecisionProviderRequest) -> dict[str, Any]:
+    from herald.router.decisions import DecisionProvider, registry as decision_registry
+    if request.name != name:
+        raise HTTPException(400, "provider name must match the URL")
+    try:
+        return {"provider": decision_registry.put(DecisionProvider(**request.model_dump()))}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.delete("/v1/decision-providers/{name:path}")
+def delete_decision_provider(name: str) -> dict[str, Any]:
+    from herald.router.decisions import registry as decision_registry
+    if not decision_registry.delete(name):
+        raise HTTPException(404, "decision provider not found")
+    return {"deleted": name}
+
+
+@app.post("/v1/decisions/usage")
+def record_decision_usage(request: DecisionUsageRequest) -> dict[str, Any]:
+    """Record UA LLM/rules route metadata. Prompts and answers are not accepted."""
+    from herald.router.decisions import registry as decision_registry
+    try:
+        decision_registry.record(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"recorded": True}
+
+
 @app.post("/v1/chat/completions")
 def openai_chat_completions(request: OpenAIChatRequest) -> Any:
+    from .multimodal import images, extract
+    try:
+        validated = extract(request.messages)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    token = images.set(validated)
+    try:
+        return _openai_chat_completions(request)
+    finally:
+        images.reset(token)
+
+
+def _openai_chat_completions(request: OpenAIChatRequest) -> Any:
     named_lane = None
     if request.cli_account:
         # Resolve at the execution boundary.  The client-supplied model is
@@ -1312,6 +1391,7 @@ def openai_chat_completions(request: OpenAIChatRequest) -> Any:
     if external_catalog:
         prompt = _external_tool_prompt(prompt, external_catalog)
     thinking = None
+    full = None
     # Tag adapters.py's call_cli() (a real CLI subprocess with no direct
     # access to this request's project/part) so its own live step events
     # can be filtered by /schedule watch, same as the harness-level events
@@ -1435,6 +1515,13 @@ def openai_chat_completions(request: OpenAIChatRequest) -> Any:
     response = _openai_response_payload(
         selected_model, content, external_catalog, bridge_backend=bridge_backend,
     )
+    if full is not None:
+        # Keep provider-reported metrics available to SDK consumers making
+        # decisions. Missing usage stays absent; it is not a zero-token call.
+        if isinstance(full.get("usage"), dict):
+            response["usage"] = full["usage"]
+        response["backend"] = full.get("backend")
+        response["resolved_model"] = full.get("model") or full.get("backend") or selected_model
     response["herald_policy"] = policy.to_dict()
     # Separate thinking stream: only ever populated when a backend actually
     # returns real reasoning text (LM Studio's reasoning_content today) --
@@ -1908,13 +1995,17 @@ def _configured_cli_usage_profiles() -> list[dict[str, Any]]:
 @app.get("/usage/summary")
 def http_usage_summary() -> dict[str, Any]:
     """Return the aggregate telemetry consumed by both Herald clients."""
-    return telemetry.usage_summary()
+    summary = telemetry.usage_summary()
+    from herald.router.decisions import registry as decision_registry
+    summary["decisions"] = decision_registry.usage_summary()
+    return summary
 
 
 @app.get("/usage/all")
 def usage_all(refresh: bool = False, include_history: bool = False) -> dict[str, Any]:
     """Unify every usage signal Herald can measure without inventing quotas."""
     summary = telemetry.usage_summary()
+    from herald.router.decisions import registry as decision_registry
     measured = {row["backend_name"]: row for row in summary["by_backend"]}
     backends = []
     for backend in registry.list_all():
@@ -1963,6 +2054,7 @@ def usage_all(refresh: bool = False, include_history: bool = False) -> dict[str,
             refresh=refresh, profiles=_configured_cli_usage_profiles()
         ),
         "browser_sessions": summary["browser_sessions"],
+        "decisions": decision_registry.usage_summary(),
         "quotas": quota_tracker.get_all_quotas(registry.list_all()),
         "coverage": [
             "Router calls are measured for CLI, API-key, browser-session, and local backends.",
@@ -3958,9 +4050,12 @@ async def nodes_http(node: str, path: str, request: Request):
         status, reply_headers, body = await relay.http(
             node, request.method, "/" + path, request.url.query, headers, await request.body())
     except LookupError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(503, str(exc), headers={"X-Herald-Execution-Status": "not_started"}) from exc
+    except TimeoutError as exc:
+        raise HTTPException(504, "Device did not provide response headers in time; execution may have started",
+                            headers={"X-Herald-Execution-Status": "unknown"}) from exc
     except ConnectionError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(502, str(exc), headers={"X-Herald-Execution-Status": "unknown"}) from exc
     reply_headers = {k: v for k, v in reply_headers.items() if k.lower() not in _RELAY_HOP_HEADERS}
     return StreamingResponse(body, status_code=status, headers=reply_headers)
 

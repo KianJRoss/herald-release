@@ -220,10 +220,11 @@ class Registry:
         # presets through capabilities while retaining its account/model pool.
         capability = ROUTE_CAPABILITIES.get(pool_or_name)
         if capability:
-            return [
-                backend for backend in self.list_all()
-                if backend.capabilities.get(capability) is True
-            ]
+            everything = self.list_all()
+            tagged = [backend for backend in everything if backend.capabilities.get(capability) is True]
+            # Nothing enabled is tagged for this preset (say, one API key added without capabilities):
+            # every backend is a candidate, in priority order, so one account serves every preset.
+            return tagged if any(backend.enabled for backend in tagged) else everything
         return []
 
     def set_enabled(self, name: str, enabled: bool) -> None:

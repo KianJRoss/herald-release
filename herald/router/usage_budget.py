@@ -73,7 +73,7 @@ def _matches_backend(cli_name: str, backend_name: str) -> bool:
     if "codex" in name:
         if "backup" in name:
             return backend_name == "codex-backup"
-        return backend_name in ("codex-primary", "personal-codex-primary")
+        return backend_name == "codex-primary" or backend_name.endswith("-codex-primary")
     if "antigravity" in name or "argon" in name or "gemini models" in name:
         if "argon" in name:
             return backend_name in ("antigravity", "gemini-pro")

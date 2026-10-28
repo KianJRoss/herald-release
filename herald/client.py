@@ -477,10 +477,38 @@ class RouterClient:
             body["cost_per_1k_tokens"] = cost_per_1k_tokens
         return self._post("/backends", body)
 
-    def decide(self, state: Any, questions: dict[str, Any]) -> dict[str, Any]:
+    def decide(
+        self, state: Any, questions: dict[str, Any], *,
+        provider: str | None = None, model: str | None = None,
+        decision_name: str | None = None,
+    ) -> dict[str, Any]:
         """Typed answers (choice / score / noul) from the Router's decision model, each with
-        probabilities and a confidence. Raises on 503: no decision model, fall back to an LLM."""
-        return self._post("/v1/decide", {"state": state, "questions": questions})
+        probabilities and (choice/score) confidence. An error envelope means the caller
+        should fall back to its ordinary LLM or rules route."""
+        body: dict[str, Any] = {"state": state, "questions": questions}
+        if provider is not None:
+            body["provider"] = provider
+        if model is not None:
+            body["model"] = model
+        if decision_name is not None:
+            body["decision_name"] = decision_name
+        return self._post("/v1/decide", body)
+
+    def list_decision_providers(self) -> list[dict[str, Any]]:
+        return self._get("/v1/decision-providers").get("providers", [])
+
+    def configure_decision_provider(self, name: str, provider_type: str, url: str, model: str, **options: Any) -> dict[str, Any]:
+        from urllib.parse import quote
+        body = {"name": name, "provider_type": provider_type, "url": url, "model": model, **options}
+        return self._put(f"/v1/decision-providers/{quote(name, safe='')}", body)
+
+    def delete_decision_provider(self, name: str) -> dict[str, Any]:
+        from urllib.parse import quote
+        return self._delete(f"/v1/decision-providers/{quote(name, safe='')}")
+
+    def record_decision(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Record LLM/rules decision usage; never include prompts or answers."""
+        return self._post("/v1/decisions/usage", record)
 
     def delete_backend(self, name: str) -> dict[str, Any]:
         return self._delete(f"/backends/{name}")

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import itertools
+from concurrent.futures import CancelledError as FutureCancelledError
 import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -104,37 +105,72 @@ class Relay:
 
     # -- MCP servers on a node ------------------------------------------------
 
+    @staticmethod
+    def _uncertain(name: str, reason: str) -> dict[str, Any]:
+        return {"error": f"device '{name}': {reason}; execution outcome is unknown. "
+                         "Inspect the target state before repeating a change.",
+                "error_kind": "outcome_unknown", "execution_status": "unknown", "retry_safe": False}
+
     async def request(self, name: str, frame: dict[str, Any], timeout: float) -> dict[str, Any]:
-        """Send list/call to a node; returns its result frame or {"error": ...}."""
+        """Never replay a call whose result was lost; bound both send and response."""
         node = self.get(name)
         if node is None:
-            return {"error": f"device '{name}' is not connected"}
+            return {"error": f"device '{name}' is not connected", "error_kind": "device_offline",
+                    "execution_status": "not_started", "retry_safe": True}
         fid = self._id()
         future = asyncio.get_running_loop().create_future()
         node.pending[fid] = future
-        try:
+
+        async def exchange():
             await node.send({**frame, "id": fid})
-            return await asyncio.wait_for(future, timeout)
+            return await future
+
+        try:
+            return await asyncio.wait_for(exchange(), timeout)
         except asyncio.TimeoutError:
             await _quiet(node.send({"type": "cancel", "id": fid}))
-            return {"error": f"device '{node.label}' did not answer within {timeout:.0f}s"}
-        except ConnectionError as exc:
-            return {"error": f"device '{node.label}': {exc}"}
+            return self._uncertain(node.label, f"did not answer within {timeout:.0f}s")
+        except asyncio.CancelledError:
+            await _quiet(node.send({"type": "cancel", "id": fid}))
+            raise
+        except Exception:
+            return self._uncertain(node.label, "connection interrupted")
         finally:
             node.pending.pop(fid, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()  # retrieve a detach error even if send failed first
 
     def _sync(self, name: str, frame: dict[str, Any], timeout: float) -> dict[str, Any]:
-        """For tool execution running on a worker thread (tool_executor)."""
+        """For tool execution on a worker thread; cancel abandoned submissions."""
         loop = self.loop
         if loop is None or not loop.is_running():
-            return {"error": f"device '{name}' is not connected"}
-        return asyncio.run_coroutine_threadsafe(self.request(name, frame, timeout), loop).result(timeout + 5)
+            return {"error": f"device '{name}' is not connected", "execution_status": "not_started",
+                    "error_kind": "device_offline", "retry_safe": True}
+        request = self.request(name, frame, timeout)
+        try:
+            pending = asyncio.run_coroutine_threadsafe(request, loop)
+        except RuntimeError:
+            request.close()
+            return {"error": f"device '{name}' relay is stopped", "execution_status": "not_started",
+                    "error_kind": "device_offline", "retry_safe": True}
+        try:
+            return pending.result(timeout + 5)
+        except (TimeoutError, FutureCancelledError):
+            pending.cancel()
+            return self._uncertain(name, "relay event loop did not respond")
+
+    @staticmethod
+    def _tool_error(frame: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "error": str(frame["error"]),
+                **{key: frame[key] for key in ("error_kind", "execution_status", "retry_safe") if key in frame}}
 
     def list_tools(self, name: str, server: str, env: dict[str, str] | None = None,
                    timeout: float = 15) -> dict[str, Any]:
         frame = self._sync(name, {"type": "list", "server": server, "env": env or {}}, timeout)
         if frame.get("error"):
-            return {"ok": False, "error": str(frame["error"])}
+            return self._tool_error(frame)
         return {"ok": True, "tools": (frame.get("result") or {}).get("tools", [])}
 
     def call_tool(self, name: str, server: str, tool: str, arguments: dict[str, Any],
@@ -142,23 +178,32 @@ class Relay:
         frame = self._sync(name, {"type": "call", "server": server, "tool": tool,
                                   "arguments": arguments, "env": env or {}}, timeout)
         if frame.get("error"):
-            return {"ok": False, "error": str(frame["error"])}
+            return self._tool_error(frame)
         result = frame.get("result") or {}
         return {"ok": not bool(result.get("isError")), "result": result}
 
     # -- http -------------------------------------------------------------------
 
     async def http(self, name: str, method: str, path: str, query: str, headers: dict[str, str],
-                   body: bytes) -> tuple[int, dict[str, str], AsyncIterator[bytes]]:
+                   body: bytes, *, head_timeout: float = 600) -> tuple[int, dict[str, str], AsyncIterator[bytes]]:
         node = self.get(name)
         if node is None:
             raise LookupError(f"device '{name}' is not connected")
         fid = self._id()
         queue: asyncio.Queue = asyncio.Queue()
         node.streams[fid] = queue
-        await node.send({"type": "http", "id": fid, "method": method, "path": path, "query": query,
-                         "headers": headers, "body": base64.b64encode(body).decode()})
-        head = await queue.get()
+        async def begin():
+            await node.send({"type": "http", "id": fid, "method": method, "path": path, "query": query,
+                             "headers": headers, "body": base64.b64encode(body).decode()})
+            return await queue.get()
+        try:
+            head = await asyncio.wait_for(begin(), head_timeout)
+        except BaseException as exc:
+            node.streams.pop(fid, None)
+            await _quiet(node.send({"type": "cancel", "id": fid}))
+            if isinstance(exc, (asyncio.CancelledError, TimeoutError)):
+                raise
+            raise ConnectionError("Device connection interrupted; execution outcome may be unknown") from exc
         if head.get("type") != "http_head":
             node.streams.pop(fid, None)
             raise ConnectionError(head.get("error") or "device closed the request")
@@ -169,10 +214,14 @@ class Relay:
                 while True:
                     frame = await queue.get()
                     if frame.get("type") == "http_chunk":
-                        yield base64.b64decode(frame.get("data") or "")
-                    else:
+                        yield base64.b64decode(frame.get("data") or "", validate=True)
+                    elif frame.get("type") == "http_end":
                         finished = True
+                        if frame.get("error"):
+                            raise ConnectionError(str(frame["error"]))
                         return
+                    else:
+                        raise ConnectionError("Unexpected device HTTP stream frame")
             finally:
                 node.streams.pop(fid, None)
                 if not finished:  # the caller went away; stop the work on the device
@@ -183,7 +232,7 @@ class Relay:
 
 async def _quiet(awaitable) -> None:
     try:
-        await awaitable
+        await asyncio.wait_for(awaitable, 2)
     except Exception:  # noqa: BLE001 - best effort on a closing socket
         pass
 

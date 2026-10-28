@@ -296,7 +296,8 @@ class StagingStore:
                     if self.conflict_resolver is None:
                         return self._failure(ids, "conflict", f"merge conflict for {patch.id}", merged)
                     resolution = self.conflict_resolver(
-                        worktree, patches, (merged.stderr or merged.stdout).strip()[-4000:],
+                        worktree, patches,
+                        "\n".join(part.strip() for part in (merged.stdout, merged.stderr) if part.strip())[-4000:],
                     )
                     if resolution.get("ok"):
                         self._git("add", "-A", cwd=worktree)

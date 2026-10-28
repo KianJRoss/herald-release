@@ -525,7 +525,7 @@ herald tool install npm:@vendor/mcp-server --name server-v1 --version 1.2.0 `
 
 ## Project policies
 
-Herald is MIT licensed. Security reports, contributions, and support requests
+Herald is licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later); releases up to 0.3.0 remain available under MIT. Security reports, contributions, and support requests
 follow [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
 [SUPPORT.md](SUPPORT.md). Bundled shell dependencies are credited in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herald-ai"
-version = "0.3.0"
+version = "0.4.0"
 description = "Route AI models, coding CLIs, and MCP tools through one Python-first platform"
 requires-python = ">=3.10"
 readme = "README.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 keywords = [
     "ai",
     "agents",
@@ -98,7 +98,7 @@ where = ["."]
 include = ["herald*"]
 
 [tool.setuptools.package-data]
-herald = ["py.typed", "router/static/**", "conf/**", "shell_assets/**"]
+herald = ["py.typed", "router/static/**", "conf/**", "shell_assets/**", "clink/systemprompts/**/*.txt"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["__pycache__/*", "**/__pycache__/*", "*.pyc", "**/*.pyc", "*.pyo", "**/*.pyo", "*.db", "**/*.db", "*.db-*", "**/*.db-*", "*.sqlite", "**/*.sqlite", "*.sqlite3", "**/*.sqlite3"]
