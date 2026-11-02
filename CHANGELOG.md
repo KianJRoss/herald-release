@@ -1,8 +1,13 @@
-﻿# Herald Changelog & Release Notes
+# Herald Changelog & Release Notes
 
 All notable changes, architectural updates, and breaking risk warnings for Herald are documented in this file.
 
 ---
+
+## [0.4.2] - 2026-11-02
+
+- Added native `openrouter` System One decision-provider support (`https://openrouter.ai/api/v1/systemone`), including automatic list-state wrapping (`{"items": state}`) and `usage.cost` normalization so one OpenRouter key can route across `jev-latest`, `perplexity/pplx-decider-v1.2`, `liquid/d1.1`, and `cloudflare/clef`.
+- Added `"batch_mode": "parallel" | "sequential"` metadata to `GET /v1/decision-providers` and `/v1/decide` responses, and raised the per-request question limit to `400` so harnesses can distinguish parallel hosted System One / OpenAI Decisions APIs (suitable for 40+ question wide semantic surmise passes) from sequential local endpoints (`ollama`, `llama_cpp`).
 
 ## [0.4.1] - 2026-10-28
 

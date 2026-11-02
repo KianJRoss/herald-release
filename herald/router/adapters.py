@@ -65,7 +65,20 @@ _PROVIDER_BASE_URLS = {
 }
 
 
-def _call_api_key_direct(config: dict[str, Any], prompt: str, timeout: float = 30.0) -> dict[str, Any]:
+# A reply can take minutes (reasoning models, local models on long agent prompts); not reaching the server at all
+# should still fail fast. An account row may set its own "timeout" in seconds.
+API_KEY_TIMEOUT_SECONDS = 300.0
+
+
+def _api_key_timeout(config: dict[str, Any]) -> httpx.Timeout:
+    try:
+        seconds = float(config.get("timeout") or API_KEY_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        seconds = API_KEY_TIMEOUT_SECONDS
+    return httpx.Timeout(seconds, connect=min(10.0, seconds))
+
+
+def _call_api_key_direct(config: dict[str, Any], prompt: str, timeout: float | httpx.Timeout | None = None) -> dict[str, Any]:
     """config: {"api_key": "...", "model_name": "...", "base_url": "..." |
     "provider": "openai"|"gemini"|"openrouter"|"deepseek"|"xai"}
     Used instead of PAL's ModelProviderRegistry when a backend row carries
@@ -74,6 +87,7 @@ def _call_api_key_direct(config: dict[str, Any], prompt: str, timeout: float = 3
     would race under FastAPI's concurrent handling. This calls the
     provider's OpenAI-compatible endpoint directly instead, same shape as
     call_local_model below."""
+    timeout = timeout if timeout is not None else _api_key_timeout(config)
     if config.get("provider") in ("anthropic", "claude"):
         try:
             base = config.get("base_url") or "https://api.anthropic.com/v1"

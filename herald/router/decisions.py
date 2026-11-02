@@ -21,8 +21,8 @@ from herald.router import decision_protocols
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_DB_PATH = database_path("decisions.db", env_var="HERALD_DECISIONS_DB")
 QUESTION_TYPES = {"choice", "score", "noul"}
-PROVIDER_TYPES = {"typesafe", "systemone", "ollama", "llama_cpp", "openai", "perplexity", "cloudflare", "liquid", "openai_compatible"}
-MAX_QUESTIONS = 32
+PROVIDER_TYPES = {"typesafe", "systemone", "openrouter", "ollama", "llama_cpp", "openai", "perplexity", "cloudflare", "liquid", "openai_compatible"}
+MAX_QUESTIONS = 400
 
 
 class DecisionUnavailable(RuntimeError):
@@ -140,7 +140,7 @@ class DecisionRegistry:
     def list(self) -> list[dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute("SELECT * FROM decision_providers ORDER BY is_default DESC, name").fetchall()
-        return [asdict(self._row(r)) for r in rows]
+        return [{**asdict(p := self._row(r)), "batch_mode": decision_protocols.batch_mode(p.provider_type, p.url)} for r in rows]
 
     @staticmethod
     def _row(row: sqlite3.Row) -> DecisionProvider:
@@ -283,12 +283,13 @@ def decide(state: Any, questions: dict[str, Any], *, provider: str | None = None
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         input_tokens = usage.get("input_tokens") if usage.get("input_tokens") is not None else usage.get("prompt_tokens")
         output_tokens = usage.get("output_tokens") if usage.get("output_tokens") is not None else usage.get("completion_tokens")
-        reported = {"decision_name": "provider response", "route": "decision_model", "status": "success", "input_tokens": input_tokens, "output_tokens": output_tokens, "cost_usd": usage.get("cost_usd")}
+        reported_cost = usage.get("cost_usd") if usage.get("cost_usd") is not None else usage.get("cost")
+        reported = {"decision_name": "provider response", "route": "decision_model", "status": "success", "input_tokens": input_tokens, "output_tokens": output_tokens, "cost_usd": reported_cost}
         try:
             validate_usage(reported)
         except ValueError:
             raise DecisionUnavailable("decision provider returned invalid usage metadata") from None
-        cost = usage.get("cost_usd")
+        cost = reported_cost
         if cost is None:
             pricing = selected.config.get("pricing", {})
             if pricing:
@@ -305,7 +306,10 @@ def decide(state: Any, questions: dict[str, Any], *, provider: str | None = None
         record.update(model=str(data.get("model") or selected.model)[:500], input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
         answers = validate_answers(questions, data.get("answers"))
         record["status"] = "success"
-        return {"answers": answers, "provider": selected.name, "model": record["model"], "latency_ms": int((time.monotonic() - started) * 1000), "usage": {"input_tokens": record["input_tokens"], "output_tokens": record["output_tokens"], "cost_usd": record["cost_usd"]}}
+        return {"answers": answers, "provider": selected.name, "model": record["model"],
+                "batch_mode": decision_protocols.batch_mode(selected.provider_type, selected.url),
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "usage": {"input_tokens": record["input_tokens"], "output_tokens": record["output_tokens"], "cost_usd": record["cost_usd"]}}
     except DecisionUnavailable as exc:
         record["fallback_reason"] = sanitize_error(exc)
         raise

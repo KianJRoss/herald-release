@@ -8,13 +8,32 @@ from __future__ import annotations
 import json
 from typing import Any
 
-SYSTEM_ONE = {"typesafe", "systemone", "ollama", "llama_cpp", "liquid", "perplexity", "cloudflare"}
+from urllib.parse import urlsplit
+
+SYSTEM_ONE = {"typesafe", "systemone", "openrouter", "ollama", "llama_cpp", "liquid", "perplexity", "cloudflare"}
+PARALLEL_PROVIDERS = {"typesafe", "openrouter", "openai", "perplexity", "cloudflare", "liquid"}
+SEQUENTIAL_PROVIDERS = {"ollama", "llama_cpp", "openai_compatible"}
+
+
+def batch_mode(kind: str, url: str = "") -> str:
+    """Return 'parallel' when the provider evaluates multi-question batches in one forward pass,
+    or 'sequential' when questions are evaluated one by one (e.g. local Ollama / llama.cpp)."""
+    if kind in PARALLEL_PROVIDERS:
+        return "parallel"
+    if kind in SEQUENTIAL_PROVIDERS:
+        return "sequential"
+    parsed = urlsplit(url or "")
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host and host not in {"localhost", "127.0.0.1", "::1"}:
+        return "parallel"
+    return "sequential"
 
 
 def request_body(kind: str, model: str, state: Any, questions: dict[str, Any],
                  config: dict[str, Any]) -> dict[str, Any]:
     if kind in SYSTEM_ONE:
-        return {"model": model, "state": state, "questions": questions}
+        payload_state = {"items": state} if kind == "openrouter" and not isinstance(state, (str, dict)) else state
+        return {"model": model, "state": payload_state, "questions": questions}
     if kind == "openai":
         items = []
         for name, q in questions.items():
@@ -56,6 +75,11 @@ def request_body(kind: str, model: str, state: Any, questions: dict[str, Any],
 
 
 def endpoint(kind: str, url: str) -> str:
+    if kind == "openrouter":
+        stripped = url.rstrip("/")
+        if stripped.endswith(("/systemone", "/decisions")):
+            return stripped
+        return stripped + ("/systemone" if stripped.endswith(("/api/v1", "/v1")) else "/api/v1/systemone")
     suffix = "/decisions" if kind == "openai" else "/chat/completions"
     if kind in SYSTEM_ONE:
         return url
