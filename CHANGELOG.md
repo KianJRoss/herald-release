@@ -4,6 +4,17 @@ All notable changes, architectural updates, and breaking risk warnings for Heral
 
 ---
 
+## [0.4.3] - 2026-11-03
+
+- **Third-party attribution:** Herald's model-provider layer (`herald/providers/`), CLI bridge and its prompts
+  (`herald/clink/`), shared utilities (`herald/utils/`) and several model catalogs are derived from
+  [pal-mcp-server](https://github.com/BeehiveInnovations/pal-mcp-server) (Apache-2.0, Copyright 2025 Beehive
+  Innovations). Earlier releases shipped this code without its license and attribution. Every package now includes
+  the upstream license (`LICENSES/Apache-2.0-pal-mcp-server.txt`), `THIRD_PARTY_NOTICES.md` lists each derived file
+  and whether Herald modified it, and each derived Python file names its upstream source.
+- OpenRouter requests now identify the app as Herald by default instead of "PAL MCP Server"
+  (`OPENROUTER_REFERER` and `OPENROUTER_TITLE` still override this).
+
 ## [0.4.2] - 2026-11-02
 
 - Added native `openrouter` System One decision-provider support (`https://openrouter.ai/api/v1/systemone`), including automatic list-state wrapping (`{"items": state}`) and `usage.cost` normalization so one OpenRouter key can route across `jev-latest`, `perplexity/pplx-decider-v1.2`, `liquid/d1.1`, and `cloudflare/clef`.

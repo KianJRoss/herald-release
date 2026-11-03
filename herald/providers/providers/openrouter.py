@@ -1,3 +1,6 @@
+# Derived from pal-mcp-server (https://github.com/BeehiveInnovations/pal-mcp-server), file providers/openrouter.py.
+# Copyright 2025 Beehive Innovations. Licensed under the Apache License, Version 2.0;
+# see LICENSES/Apache-2.0-pal-mcp-server.txt and THIRD_PARTY_NOTICES.md. Modified for Herald.
 """OpenRouter provider implementation."""
 
 import logging
@@ -35,9 +38,9 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
     # Custom headers required by OpenRouter
     DEFAULT_HEADERS = {
-        "HTTP-Referer": get_env("OPENROUTER_REFERER", "https://github.com/BeehiveInnovations/pal-mcp-server")
-        or "https://github.com/BeehiveInnovations/pal-mcp-server",
-        "X-Title": get_env("OPENROUTER_TITLE", "PAL MCP Server") or "PAL MCP Server",
+        "HTTP-Referer": get_env("OPENROUTER_REFERER", "https://github.com/KianJRoss/herald-release")
+        or "https://github.com/KianJRoss/herald-release",
+        "X-Title": get_env("OPENROUTER_TITLE", "Herald") or "Herald",
     }
 
     # Model registry for managing configurations and aliases

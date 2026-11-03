@@ -1,3 +1,6 @@
+# Derived from pal-mcp-server (https://github.com/BeehiveInnovations/pal-mcp-server), file systemprompts/consensus_prompt.py.
+# Copyright 2025 Beehive Innovations. Licensed under the Apache License, Version 2.0;
+# see LICENSES/Apache-2.0-pal-mcp-server.txt and THIRD_PARTY_NOTICES.md. Unmodified copy.
 """
 Consensus tool system prompt for multi-model perspective gathering
 """

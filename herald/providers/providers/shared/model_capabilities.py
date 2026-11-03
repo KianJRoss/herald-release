@@ -1,3 +1,6 @@
+# Derived from pal-mcp-server (https://github.com/BeehiveInnovations/pal-mcp-server), file providers/shared/model_capabilities.py.
+# Copyright 2025 Beehive Innovations. Licensed under the Apache License, Version 2.0;
+# see LICENSES/Apache-2.0-pal-mcp-server.txt and THIRD_PARTY_NOTICES.md. Unmodified copy.
 """Dataclass describing the feature set of a model exposed by a provider."""
 
 import math

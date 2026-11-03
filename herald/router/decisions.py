@@ -216,11 +216,20 @@ class DecisionRegistry:
         with closing(self._connect()) as conn:
             rows = conn.execute("""SELECT route, provider, model, COUNT(*) attempts,
                 SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,
+                SUM(CASE WHEN status='fallback' THEN 1 ELSE 0 END) fallbacks,
+                SUM(CASE WHEN status='failure' THEN 1 ELSE 0 END) failures,
                 SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
                 SUM(cost_usd) cost_usd, COUNT(cost_usd) cost_known,
                 COUNT(input_tokens) input_tokens_known, AVG(latency_ms) avg_latency_ms
                 FROM decision_usage GROUP BY route, provider, model ORDER BY attempts DESC""").fetchall()
-        return {"by_route": [dict(r) for r in rows]}
+            by_decision = conn.execute("""SELECT decision_name, route, provider, model, COUNT(*) attempts,
+                SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) successes,
+                SUM(CASE WHEN status='fallback' THEN 1 ELSE 0 END) fallbacks,
+                SUM(CASE WHEN status='failure' THEN 1 ELSE 0 END) failures,
+                SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+                SUM(cost_usd) cost_usd, AVG(latency_ms) avg_latency_ms
+                FROM decision_usage GROUP BY decision_name, route, provider, model ORDER BY attempts DESC""").fetchall()
+        return {"by_route": [dict(r) for r in rows], "by_decision": [dict(r) for r in by_decision]}
 
 
 def validate_usage(record: dict[str, Any]) -> None:
@@ -241,6 +250,10 @@ def validate_usage(record: dict[str, Any]) -> None:
             raise ValueError(f"{key} must be a bounded string or null")
 
 
+_DEFAULT_HTTPX_POST = httpx.post
+_HTTP_CLIENT = httpx.Client(limits=httpx.Limits(max_keepalive_connections=16, max_connections=32))
+
+
 def _request(provider: DecisionProvider, state: Any, questions: dict[str, Any], timeout: float) -> tuple[dict[str, Any], dict[str, Any]]:
     headers = {"Content-Type": "application/json"}
     if provider.secret_ref:
@@ -250,7 +263,8 @@ def _request(provider: DecisionProvider, state: Any, questions: dict[str, Any], 
             raise DecisionUnavailable("decision provider credential is unavailable") from exc
     body = decision_protocols.request_body(provider.provider_type, provider.model, state, questions, provider.config)
     url = decision_protocols.endpoint(provider.provider_type, provider.url)
-    response = httpx.post(url, json=body, headers=headers, timeout=timeout)
+    post_fn = _HTTP_CLIENT.post if httpx.post is _DEFAULT_HTTPX_POST else httpx.post
+    response = post_fn(url, json=body, headers=headers, timeout=timeout)
     response.raise_for_status()
     data = decision_protocols.response_body(provider.provider_type, response.json(), questions)
     return data, body

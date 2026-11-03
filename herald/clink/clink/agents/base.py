@@ -1,3 +1,6 @@
+# Derived from pal-mcp-server (https://github.com/BeehiveInnovations/pal-mcp-server), file clink/agents/base.py.
+# Copyright 2025 Beehive Innovations. Licensed under the Apache License, Version 2.0;
+# see LICENSES/Apache-2.0-pal-mcp-server.txt and THIRD_PARTY_NOTICES.md. Modified for Herald.
 """Execute configured CLI agents for the clink tool and parse output."""
 
 from __future__ import annotations

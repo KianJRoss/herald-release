@@ -77,9 +77,12 @@ def request_body(kind: str, model: str, state: Any, questions: dict[str, Any],
 def endpoint(kind: str, url: str) -> str:
     if kind == "openrouter":
         stripped = url.rstrip("/")
-        if stripped.endswith(("/systemone", "/decisions")):
-            return stripped
-        return stripped + ("/systemone" if stripped.endswith(("/api/v1", "/v1")) else "/api/v1/systemone")
+        path = urlsplit(stripped).path
+        if path in {"", "/"}:
+            return stripped + "/api/v1/systemone"
+        if path in {"/api/v1", "/v1"}:
+            return stripped + "/systemone"
+        return stripped
     suffix = "/decisions" if kind == "openai" else "/chat/completions"
     if kind in SYSTEM_ONE:
         return url
