@@ -15,6 +15,8 @@ agents) names an *instance* (workspace) and a *session* (e.g. a conversation id)
 from __future__ import annotations
 
 import re
+import json
+import hashlib
 import sqlite3
 import threading
 import time
@@ -32,6 +34,7 @@ def _db() -> sqlite3.Connection:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS sessions (instance TEXT, session TEXT, cli TEXT, native_id TEXT, "
         "updated_at REAL, PRIMARY KEY (instance, session, cli))")
+    connection.execute("CREATE TABLE IF NOT EXISTS session_context (instance TEXT, session TEXT, cli TEXT, native_id TEXT NOT NULL, message_count INTEGER NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(instance,session,cli))")
     return connection
 
 
@@ -61,6 +64,18 @@ def workspace(instance: str, instructions: str | None = None) -> Path:
     return path
 
 
+def session_key(cli: str, config: dict[str, Any]) -> str:
+    """Scope Router-owned native handles to a backend configuration.
+
+    Unprofiled direct callers retain the legacy CLI-only mapping. Profiled
+    Router calls never adopt an unowned legacy handle from another account.
+    """
+    if not config.get("herald_profile"):
+        return cli
+    identity = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    return cli + ":profile-v1:" + hashlib.sha256(identity.encode()).hexdigest()
+
+
 def native_session(instance: str, session: str, cli: str) -> str | None:
     with _lock, _db() as db:
         row = db.execute("SELECT native_id FROM sessions WHERE instance=? AND session=? AND cli=?",
@@ -72,6 +87,37 @@ def remember_session(instance: str, session: str, cli: str, native_id: str) -> N
     with _lock, _db() as db:
         db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?,?,?,?)",
                    (safe_name(instance), str(session), cli, native_id, time.time()))
+
+
+def _digest(messages: list[dict]) -> str:
+    normalized = [{"role":m["role"],"content":m["content"]} for m in messages]
+    return hashlib.sha256(json.dumps(normalized,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+
+
+def remember_context(instance: str, session: str, cli: str, native_id: str, parts: dict, reply: str) -> None:
+    history = [*parts.get("history_items",[]), {"role":"user","content":parts["message"]}, {"role":"assistant","content":reply}]
+    with _lock, _db() as db:
+        db.execute("INSERT OR REPLACE INTO session_context VALUES (?,?,?,?,?,?)",
+                   (safe_name(instance),session,cli,native_id,len(history),_digest(history)))
+
+
+def portable_context(instance: str, session: str, cli: str, native_id: str, parts: dict, budget: int = 16000) -> dict | None:
+    history = parts.get("history_items", [])
+    with _lock, _db() as db:
+        row=db.execute("SELECT native_id,message_count,digest FROM session_context WHERE instance=? AND session=? AND cli=?",
+                       (safe_name(instance),session,cli)).fetchone()
+    matched=bool(row and row[0]==native_id and len(history)>=row[1] and _digest(history[:row[1]])==row[2])
+    missing=history[row[1]:] if matched else history
+    if not missing:return None
+    selected=[];used=2
+    # Whole recent messages only; no token-count or completeness claim.
+    for item in reversed(missing):
+        size=len(json.dumps(item,ensure_ascii=False))+2
+        if used+size<=budget:selected.append(item);used+=size
+    selected.reverse()
+    return {"strategy":"delta" if matched else "history_changed_or_unverified", "app_session":session,
+            "messages":selected,"omitted_message_count":len(missing)-len(selected),
+            "history_character_budget":budget}
 
 
 def forget_session(instance: str, session: str, cli: str) -> None:
@@ -87,7 +133,7 @@ def _text(message: dict[str, Any]) -> str:
     return str(content or "")
 
 
-def split_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
+def split_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """OpenAI-style messages -> what an instance needs.
 
     instructions: the first system message (stable; becomes AGENTS.md / CLAUDE.md).
@@ -105,10 +151,13 @@ def split_messages(messages: list[dict[str, Any]]) -> dict[str, str]:
         "context": "\n\n".join(_text(m) for m in systems[1:] if _text(m).strip()),
         "history": "\n\n".join(f"{m['role']}: {_text(m)}" for m in history if _text(m).strip()),
         "message": message,
+        "history_items": [{"role":m["role"],"content":_text(m),
+                           **({"source_message_id":m["source_message_id"]} if isinstance(m.get("source_message_id"),int) else {})}
+                          for m in history],
     }
 
 
-def turn_prompt(parts: dict[str, str], *, fresh: bool) -> str:
+def turn_prompt(parts: dict[str, Any], *, fresh: bool, handoff: dict | None = None) -> str:
     """The prompt sent to the CLI: just the new message (plus this turn's context) when resuming; the
     conversation so far as well when the native session is new."""
     sections = []
@@ -116,5 +165,10 @@ def turn_prompt(parts: dict[str, str], *, fresh: bool) -> str:
         sections.append("<turn_context>\n" + parts["context"] + "\n</turn_context>")
     if fresh and parts["history"]:
         sections.append("<earlier_conversation>\n" + parts["history"] + "\n</earlier_conversation>")
+    if handoff:
+        sections.append("<portable_history>\nSaved conversation context from the app, not a new request to replay actions. "
+                        "It does not transfer tool state, permissions or proof that prior actions succeeded. "
+                        "Some messages may be omitted; use authorized conversation recall when needed.\n"
+                        + json.dumps(handoff,ensure_ascii=False) + "\n</portable_history>")
     sections.append(parts["message"])
     return "\n\n".join(sections)

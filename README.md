@@ -16,7 +16,7 @@ failover, usage, and tool access behind a consistent interface.
 | --- | --- | --- |
 | **Herald Router** | Connects models, accounts, coding CLIs, and MCP tools. It applies routing modes, health checks, budgets, project scopes, and failover in one control plane. | Giving a team or application one stable AI endpoint instead of integrating every provider separately. |
 | **Herald CLI** | Provides focused terminal commands plus a full-screen, Pi-based agent interface. Agents can code, handle everyday work, call scoped tools, and delegate to other models. | Interactive work, repository tasks, automation, and multi-agent workflows. |
-| **Herald Package** | Exposes simple helpers and durable agents through ordinary Python, with a TypeScript router client for web and Node applications. | Fast, contextual decisions that are too ambiguous for a normal algorithm but too frequent to send through a manual workflow. |
+| **Herald Package** | Exposes simple helpers and durable agents through ordinary Python, with HTTP endpoints usable from web and Node applications. | Fast, contextual decisions that are too ambiguous for a normal algorithm but too frequent to send through a manual workflow. |
 
 The Router is the shared foundation. The CLI and Package are independent
 clients of it, so a model, account, or tool configured once can be used from a
@@ -495,8 +495,8 @@ herald memory delete <id-or-prefix>
 
 Exports are deliberately decrypted JSON and may contain private inputs. The
 Account Console provides list/reset/delete controls while keeping contents
-hidden. A matching TypeScript client lives in `sdk/typescript`; Python 0.2's
-supported compatibility surface is documented in `docs/PUBLIC_API.md`.
+hidden. This release distributes the Python SDK; the supported interfaces are
+documented in `docs/PUBLIC_API.md`.
 
 `router.yaml` separates tool installations from part bindings. Project tools
 are stored under `.herald/tools`, are invisible to other projects, and may have

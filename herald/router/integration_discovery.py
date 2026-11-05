@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -12,8 +14,8 @@ from herald.router.secret_vault import SecretVault
 
 try:
     import tomllib
-except ImportError:  # pragma: no cover - Python 3.10
-    tomllib = None
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 
 def _candidate_files(home: Path) -> list[tuple[str, Path, str]]:

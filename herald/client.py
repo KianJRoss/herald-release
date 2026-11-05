@@ -427,6 +427,15 @@ class RouterClient:
     def list_backends(self) -> list[dict[str, Any]]:
         return self._get("/backends").get("backends", [])
 
+    def backend_capabilities(self, name: str) -> dict[str, Any]:
+        """Read implemented/unknown adapter features; this does not run a provider probe."""
+        from urllib.parse import quote
+        return self._get(f"/backends/{quote(name, safe='')}/capabilities")
+
+    def inspect_swarm_run(self, run_id: str, *, repo_path: str) -> dict[str, Any]:
+        """Read a run summary; repo_path identifies the repository on the Router host."""
+        return self._get("/swarm/runs/inspect", run_id=run_id, repo_path=repo_path)
+
     def admin_reviews(self) -> list[dict[str, Any]]:
         """Return completed autonomous bundles awaiting operator review."""
         return self._get("/admin/reviews").get("reviews", [])
@@ -446,9 +455,16 @@ class RouterClient:
     def trusted_devices(self) -> list[dict[str, Any]]:
         return self._get("/devices").get("devices", [])
 
-    def approve_device(self, code: str) -> dict[str, Any]:
+    def approve_device(self, code: str, *, node_id: str | None = None) -> dict[str, Any]:
         """Trust a pending device by its short pairing code and hand it a bearer token."""
-        return self._post("/devices/approve", {"code": code})
+        payload = {"code": code}
+        if node_id is not None:
+            payload["node_id"] = node_id
+        return self._post("/devices/approve", payload)
+
+    def device_identity(self) -> dict[str, Any]:
+        """This Router's public identity for comparison during pairing."""
+        return self._get("/devices/self").get("device", {})
 
     def revoke_device(self, node_id: str) -> dict[str, Any]:
         return self._post(f"/devices/{node_id}/revoke", {})

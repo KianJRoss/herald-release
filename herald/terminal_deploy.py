@@ -13,7 +13,10 @@ import re
 import shutil
 import subprocess
 import tempfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping

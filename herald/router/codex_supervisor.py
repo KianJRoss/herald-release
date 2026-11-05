@@ -14,7 +14,9 @@ nudge is actually warranted.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from pathlib import Path
 
 STALL_MINUTES = 5

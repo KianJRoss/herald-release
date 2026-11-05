@@ -630,14 +630,27 @@ def _call_cli_with_images(
     # A whole-CLI instance (cli_instances.py): its own workspace and instructions, and its native session
     # resumed so the CLI keeps its own history; only the new message (+ this turn's context) is sent.
     instance = event_bus.get_scope().get("cli_instance") if cli_kind else None
-    resume_id = None
+    resume_id = config.get("native_resume_id")
+    if resume_id is not None:
+        if cli_kind not in {"codex", "claude"}:
+            return {"ok": False, "error_kind": "unsupported_resume", "error": "Native continuation is not supported for this CLI"}
+        if not isinstance(resume_id, str) or not resume_id.strip() or resume_id.startswith("-"):
+            return {"ok": False, "error_kind": "invalid_resume", "error": "Invalid native session ID"}
+        if instance:
+            return {"ok": False, "error_kind": "invalid_resume", "error": "Explicit continuation cannot override an instance session"}
+    instance_session_key = cli_kind
+    handoff = None
     if instance:
         from herald.router import cli_instances
+        instance_session_key = cli_instances.session_key(cli_kind, config)
         client = client.model_copy(update={"working_dir": cli_instances.workspace(
             instance["instance"], instance["parts"]["instructions"])})
         if cli_kind in cli_instances.RESUMABLE and instance.get("session"):
-            resume_id = cli_instances.native_session(instance["instance"], instance["session"], cli_kind)
-        prompt = cli_instances.turn_prompt(instance["parts"], fresh=resume_id is None)
+            resume_id = cli_instances.native_session(instance["instance"], instance["session"], instance_session_key)
+        handoff = None
+        if resume_id and instance.get("portable_handoff"):
+            handoff = cli_instances.portable_context(instance["instance"], instance["session"], instance_session_key, resume_id, instance["parts"])
+        prompt = cli_instances.turn_prompt(instance["parts"], fresh=resume_id is None, handoff=handoff)
     source_prompt = prompt
     current_images = request_images.get()
     if current_images and cli_kind not in {"codex", "claude", "antigravity"}:
@@ -645,6 +658,8 @@ def _call_cli_with_images(
     image_args = []
     if current_images and cli_kind in {"codex", "antigravity"}:
         folder = Path(image_resources.enter_context(tempfile.TemporaryDirectory(prefix="herald-images-")))
+        from .private_files import protect_directory
+        protect_directory(folder)
         for index, image in enumerate(current_images):
             suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[image.media_type]
             file = folder / (str(index) + suffix)
@@ -691,14 +706,23 @@ def _call_cli_with_images(
             stdin_text=prompt if cli_kind == "codex" else stream_stdin,
             health_check_interval=config.get("health_check_interval"),
         )
+        if (instance and instance.get("portable_handoff") and resume_id and result.get("ok")
+                and result.get("native_session_id") != resume_id):
+            # A native restart cannot be treated as confirmed continuity. It may
+            # already have performed work, so do not automatically replay here.
+            return {**result, "ok": False, "error_kind": "session_mismatch",
+                    "error": "Provider did not confirm the resumed session; context continuity is uncertain"}
         if instance and instance.get("session"):
             from herald.router import cli_instances
             if result.get("ok") and result.get("native_session_id"):
-                cli_instances.remember_session(instance["instance"], instance["session"], cli_kind,
+                cli_instances.remember_session(instance["instance"], instance["session"], instance_session_key,
                                                result["native_session_id"])
-            elif resume_id and not result.get("ok") and not result.get("native_tools_started"):
+                if instance.get("portable_handoff") and (not handoff or not handoff["omitted_message_count"]):
+                    cli_instances.remember_context(instance["instance"], instance["session"], instance_session_key,
+                                                   result["native_session_id"], instance["parts"], str(result.get("content") or ""))
+            elif resume_id and not result.get("ok") and not result.get("native_tools_started") and not instance.get("portable_handoff"):
                 # The native session is gone (pruned, other machine...): start it fresh with the history.
-                cli_instances.forget_session(instance["instance"], instance["session"], cli_kind)
+                cli_instances.forget_session(instance["instance"], instance["session"], instance_session_key)
                 return call_cli(config, source_prompt, timeout, working_dir=working_dir)
         if (cli_kind == "antigravity" and not result.get("ok") and not result.get("native_tools_started")
                 and result.get("error_kind") != "auth" and config.get("model_fallback", True)

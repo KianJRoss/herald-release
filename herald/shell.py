@@ -1,6 +1,7 @@
 """Install and launch Herald's managed coding environment."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -16,8 +17,8 @@ from pathlib import Path
 import httpx
 
 
-PI_VERSION = "0.84.2"
-MINIMUM_NODE_MAJOR = 22
+PI_VERSION = "1.5.0"
+MINIMUM_NODE_VERSION = (22, 19, 0)
 PRIVATE_NODE_VERSION = "22.19.0"
 THEME_PALETTES: dict[str, dict[str, str]] = {
     "herald-midnight": {"cyan": "#7DD3FC", "blue": "#818CF8", "violet": "#C084FC", "green": "#34D399", "panel": "#080D18"},
@@ -39,12 +40,15 @@ class ShellRuntime:
     plan_mode_extension: Path | None = None
 
 
-def _node_major(executable: str) -> int | None:
+def _node_version(executable: str) -> tuple[int, int, int] | None:
     try:
         output = subprocess.run(
             [executable, "--version"], capture_output=True, text=True, timeout=10,
         ).stdout.strip().lstrip("v")
-        return int(output.split(".", 1)[0])
+        parts = output.split(".")
+        if len(parts) != 3:
+            return None
+        return tuple(int(part) for part in parts)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
@@ -68,7 +72,7 @@ def _install_private_node() -> str:
     node = runtime / relative_node
     npm_link = node.with_name("npm.cmd" if os.name == "nt" else "npm")
     npm_layout_ok = npm_link.exists() and (os.name == "nt" or npm_link.is_symlink())
-    if (_node_major(str(node)) or 0) >= MINIMUM_NODE_MAJOR and npm_layout_ok:
+    if (_node_version(str(node)) or (0, 0, 0)) >= MINIMUM_NODE_VERSION and npm_layout_ok:
         return str(node)
     runtime.mkdir(parents=True, exist_ok=True)
     url = f"https://nodejs.org/dist/v{PRIVATE_NODE_VERSION}/{archive_name}"
@@ -101,7 +105,7 @@ def _install_private_node() -> str:
             if destination.exists() or destination.is_symlink():
                 destination.unlink()
         shutil.copytree(roots[0], runtime, dirs_exist_ok=True, symlinks=True)
-    if (_node_major(str(node)) or 0) < MINIMUM_NODE_MAJOR:
+    if (_node_version(str(node)) or (0, 0, 0)) < MINIMUM_NODE_VERSION:
         raise RuntimeError("private Node installation completed but its executable is unusable")
     return str(node)
 
@@ -110,7 +114,7 @@ def _resolve_node() -> str:
     configured = os.environ.get("HERALD_NODE")
     candidates = [configured, shutil.which("node")]
     for candidate in candidates:
-        if candidate and (_node_major(candidate) or 0) >= MINIMUM_NODE_MAJOR:
+        if candidate and (_node_version(candidate) or (0, 0, 0)) >= MINIMUM_NODE_VERSION:
             return candidate
     return _install_private_node()
 
@@ -287,16 +291,24 @@ def install_shell(*, force: bool = False) -> ShellRuntime:
     plan_mode_extension = root / "node_modules" / "@narumitw" / "pi-plan-mode" / "dist" / "index.ts"
     cli = root / "node_modules" / "@earendil-works" / "pi-coding-agent" / "dist" / "cli.js"
     assets = files("herald.shell_assets")
-    if force or not cli.exists() or not plan_mode_extension.exists():
+    package_content = assets.joinpath("package.json").read_text(encoding="utf-8")
+    lock_content = assets.joinpath("package-lock.json").read_text(encoding="utf-8")
+    fingerprint = hashlib.sha256((package_content + "\0" + lock_content).encode("utf-8")).hexdigest()
+    stamp = root / ".herald-dependencies-sha256"
+    current = stamp.read_text(encoding="utf-8").strip() if stamp.is_file() else ""
+    if force or current != fingerprint or not cli.exists() or not plan_mode_extension.exists():
         root.mkdir(parents=True, exist_ok=True)
-        package_json.write_text(assets.joinpath("package.json").read_text(encoding="utf-8"), encoding="utf-8")
+        stamp.unlink(missing_ok=True)
+        package_json.write_text(package_content, encoding="utf-8")
+        (root / "package-lock.json").write_text(lock_content, encoding="utf-8")
         npm, install_env = _npm_for_node(node)
         result = subprocess.run(
-            [npm, "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=root,
+            [npm, "ci", "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund"], cwd=root,
             env=install_env,
         )
         if result.returncode != 0:
             raise RuntimeError(f"npm failed to install the Herald shell runtime ({result.returncode})")
+        stamp.write_text(fingerprint + "\n", encoding="utf-8")
     _apply_herald_runtime_overlay(root)
     # These are Herald-owned managed assets. Refresh them on every launch so an
     # editable/package upgrade never leaves an older command surface in place.

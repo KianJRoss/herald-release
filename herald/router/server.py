@@ -45,7 +45,9 @@ import threading
 import uuid
 from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from typing import Any
 
 from pathlib import Path
@@ -268,7 +270,8 @@ def herald_ui_css() -> FileResponse:
 
 @app.get("/devices/self")
 def devices_self() -> dict[str, Any]:
-    return {"device": _mesh_trust().self_identity().to_dict()}
+    return {"device": {**_mesh_trust().self_identity().to_dict(),
+                       "approval_binding": "node_id_and_code_v1", "grant_protocol": "sealed_v2"}}
 
 
 @app.get("/devices/pending")
@@ -293,6 +296,7 @@ def devices_revoke(node_id: str) -> dict[str, Any]:
 
 class DeviceApproveRequest(BaseModel):
     code: str
+    node_id: str | None = None
 
 
 @app.post("/devices/approve")
@@ -306,74 +310,70 @@ async def devices_approve(payload: DeviceApproveRequest) -> dict[str, Any]:
     local decision; delivering the token lets the device actually use that trust.
     """
     trust = _mesh_trust()
-    pending = trust.find_by_code(payload.code)
+    try:
+        pending = trust.get(payload.node_id) if payload.node_id else trust.find_by_code(payload.code)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if pending is None:
         raise HTTPException(404, f"no pending device with code '{payload.code}'")
-    approved = trust.approve(pending.node_id)
+    try:
+        approved = trust.approve(pending.node_id, expected_code=payload.code)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     self_id = trust.self_identity()
 
-    push_error = None
+    push_error = "device has no advertised endpoint for grant delivery"
     if approved.address and approved.port:
-        message = f"{self_id.node_id}:{approved.bearer_token}".encode()
-        signature = trust.sign(message)
+        push_error = None
         try:
+            envelope = trust.seal_grant(approved)
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.post(
-                    f"http://{approved.address}:{approved.port}/devices/accept-grant",
-                    json={
-                        "approver_node_id": self_id.node_id,
-                        "approver_public_key_pem": self_id.public_key_pem,
-                        "bearer_token": approved.bearer_token,
-                        "signature": base64.b64encode(signature).decode(),
-                    },
-                )
+                    f"http://{approved.address}:{approved.port}/devices/accept-grant", json=envelope)
                 if response.status_code >= 400:
-                    push_error = f"device rejected the grant: HTTP {response.status_code}"
-        except httpx.HTTPError as exc:
-            push_error = f"could not reach device to deliver the grant: {exc}"
+                    push_error = f"device rejected the encrypted grant: HTTP {response.status_code}; both peers need Herald 0.4.4 or later"
+                elif response.json().get("accepted") is not True:
+                    push_error = "device did not acknowledge the encrypted grant"
+        except (httpx.HTTPError, ValueError, AttributeError):
+            push_error = "could not deliver encrypted grant; check peer connectivity and Herald version"
 
-    result = {"device": approved.to_dict(reveal_token=True)}
+    # Older code-only callers retain their response shape. The identity-bound
+    # UI flow never returns a node credential to a browser.
+    result = {"device": approved.to_dict(reveal_token=payload.node_id is None)}
     if push_error:
         result["push_warning"] = push_error
     return result
 
 
 class DeviceAcceptGrantRequest(BaseModel):
-    approver_node_id: str
-    approver_public_key_pem: str
-    bearer_token: str
-    signature: str
+    version: int = 1
+    approver_node_id: str = Field(min_length=1, max_length=200)
+    approver_public_key_pem: str = Field(min_length=1, max_length=4096)
+    recipient_node_id: str | None = Field(default=None, max_length=200)
+    sealed_grant: str | None = Field(default=None, max_length=16384)
+    signature: str = Field(max_length=1024)
+    # Recognize the old envelope only to return an actionable upgrade response.
+    bearer_token: str | None = Field(default=None, max_length=512, repr=False)
 
 
 @app.post("/devices/accept-grant")
 async def devices_accept_grant(payload: DeviceAcceptGrantRequest) -> dict[str, Any]:
-    """Receive a signed trust grant pushed by an approving node.
-
-    Deliberately exempt from the shared bearer-token middleware (see
-    require_public_bind_token) since no token exists for this exchange yet --
-    it is authenticated instead by an Ed25519 signature checked against the
-    public key this node already recorded for the approver during mDNS
-    discovery (TOFU pinning), so a request claiming a different key than what
-    was actually observed on the network is rejected outright.
-    """
+    """Accept only an encrypted outbound credential, never inbound approval."""
+    if payload.version != 2 or not payload.recipient_node_id or not payload.sealed_grant or payload.bearer_token is not None:
+        raise HTTPException(426, "Encrypted mesh grants require Herald 0.4.4 or later on both peers")
     trust = _mesh_trust()
-    known = trust.get(payload.approver_node_id)
-    if known is None or known.public_key_pem != payload.approver_public_key_pem:
-        raise HTTPException(403, "approver identity does not match what was seen via discovery")
     try:
-        signature = base64.b64decode(payload.signature)
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(400, "malformed signature") from exc
-    message = f"{payload.approver_node_id}:{payload.bearer_token}".encode()
-    from herald.router.mesh_trust import MeshTrust
-    if not MeshTrust.verify(payload.approver_public_key_pem, message, signature):
-        raise HTTPException(403, "signature does not match the approver's known public key")
-    trust.accept_remote_grant(
-        approver_node_id=payload.approver_node_id,
-        approver_public_key_pem=payload.approver_public_key_pem,
-        my_bearer_token=payload.bearer_token,
-    )
-    return {"accepted": True}
+        grant=trust.open_grant(approver_node_id=payload.approver_node_id,
+            approver_public_key_pem=payload.approver_public_key_pem,
+            recipient_node_id=payload.recipient_node_id,sealed_grant=payload.sealed_grant,signature=payload.signature)
+        trust.accept_remote_grant(approver_node_id=payload.approver_node_id,
+            approver_public_key_pem=payload.approver_public_key_pem,
+            my_bearer_token=grant["bearer_token"],grant_revision=grant["grant_revision"])
+    except PermissionError as exc:
+        raise HTTPException(403,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    return {"accepted": True, "local_approval": False}
 
 
 @app.get("/ui")
@@ -761,6 +761,7 @@ class OpenAIChatRequest(BaseModel):
     cli_account: str | None = None
     # Whole-CLI instances (cli_instances.py): run the CLI in its own workspace, the first system message
     # as its AGENTS.md/CLAUDE.md, and resume its native session for this `session` key across calls.
+    portable_handoff: bool = False
     instance: str | None = Field(default=None, max_length=80)
     session: str | None = Field(default=None, max_length=200)
 
@@ -1022,6 +1023,15 @@ class AccountTestRequest(BaseModel):
 @app.get("/backends")
 def list_backends() -> dict[str, Any]:
     return {"backends": [_backend_to_dict(b) for b in registry.list_all()]}
+
+
+@app.get("/backends/{name}/capabilities")
+def inspect_backend_capabilities(name: str) -> dict[str, Any]:
+    from herald.router.provider_capabilities import backend_capabilities
+    backend = registry.get(name)
+    if backend is None:
+        raise HTTPException(404, "Backend not found")
+    return backend_capabilities(backend)
 
 
 @app.get("/backends/{name}/native-inventory")
@@ -1406,7 +1416,7 @@ def _openai_chat_completions(request: OpenAIChatRequest) -> Any:
     if request.instance:
         from herald.router import cli_instances
         instance_scope = {"instance": request.instance, "session": request.session,
-                          "parts": cli_instances.split_messages(request.messages)}
+                          "parts": cli_instances.split_messages(request.messages), "portable_handoff": request.portable_handoff}
     event_bus.set_scope({
         "project": request.project, "part": request.part,
         "activity_id": request.activity_id,
@@ -3521,6 +3531,29 @@ def _admin_control():
     except ImportError:
         raise HTTPException(404, "Admin console is a development-build-only feature") from None
     return admin_control
+
+
+@app.get("/swarm/runs/inspect")
+def http_swarm_run_inspect(run_id: str, repo_path: str) -> dict[str, Any]:
+    """Read a durable run summary under the Router's existing auth policy."""
+    import hashlib
+    from herald.router.swarm_attempts import AttemptStore
+    from herald.router.staging_zone import DEFAULT_DB_PATH
+    if not run_id.strip() or not repo_path.strip():
+        raise HTTPException(400, "run_id and repo_path must be nonempty")
+    key = json.dumps(["run", str(Path(repo_path).resolve()), run_id])
+    receipt = AttemptStore.inspect(Path(DEFAULT_DB_PATH).with_suffix(".attempts.db"), key)
+    if receipt is None:
+        raise HTTPException(404, "Swarm run not found")
+    outcome = (receipt.get("result") or {}).get("run_result") or {}
+    return {
+        "run_id": run_id, "state": receipt["state"], "updated_at": receipt["updated_at"],
+        "status": outcome.get("status", "running_or_interrupted"),
+        "results": [{**{name: task.get(name) for name in ("task_id", "success", "patch_id", "attempts")},
+                     "attempt_id": hashlib.sha256(task["attempt_id"].encode()).hexdigest() if task.get("attempt_id") else None}
+                    for task in outcome.get("results", [])],
+        "merge_status": (outcome.get("merge_result") or {}).get("status"),
+    }
 
 
 @app.get("/admin/status")

@@ -201,7 +201,9 @@ class Relay:
         except BaseException as exc:
             node.streams.pop(fid, None)
             await _quiet(node.send({"type": "cancel", "id": fid}))
-            if isinstance(exc, (asyncio.CancelledError, TimeoutError)):
+            if isinstance(exc, asyncio.TimeoutError):
+                raise TimeoutError("Device request timed out") from exc
+            if isinstance(exc, asyncio.CancelledError):
                 raise
             raise ConnectionError("Device connection interrupted; execution outcome may be unknown") from exc
         if head.get("type") != "http_head":

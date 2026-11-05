@@ -4,6 +4,40 @@ All notable changes, architectural updates, and breaking risk warnings for Heral
 
 ---
 
+## [0.4.4] - Unreleased
+
+- Protect mesh grants with recipient-bound encryption and signatures; a received grant now records
+  outbound access only and never authorizes its sender locally. Both peers must use 0.4.4 or later.
+- Reject stale/conflicting grant replays and use longer comparison fingerprints while preserving
+  existing device records and credentials. Review legacy trusted peers when upgrading.
+
+
+- Update the managed coding agent and its dependencies; use the audited lockfile for clean installations.
+- Native image inputs use a protected Windows directory ACL before image bytes are written; POSIX permissions remain restricted.
+
+- Opt-in whole-CLI context handoff tracks hashed app-history watermarks and carries intervening turns when returning to an account. Missing/mismatched history uses a bounded labelled fallback; uncertain or partial delivery does not advance the watermark. The capability endpoint declares this support without account-probe claims.
+
+- Router-owned whole-CLI conversations scope native session handles to backend profile/configuration, preventing accounts using the same CLI from sharing a native-session lookup. Unowned legacy handles are preserved without automatic adoption.
+
+- Added versioned backend capability declarations through Router and Python SDK, separating implemented adapter features from account verification and unknown support.
+
+- Swarm network summaries use opaque attempt identifiers so internal repository paths are not exposed through encoded worker IDs.
+
+- Native continuation rejects registry backend configuration changes between turns. Committed worker changes count as work when deciding whether a corrective turn is needed.
+
+- Durable coordinators hold local OS ownership locks. `swarm --run-id ID --reconcile --reason TEXT` can close interrupted coordination for review when worker outcomes are terminal, preserving evidence and recording the decision without replaying work.
+
+- Native worker corrections remain on the original backend even if its pool order changes. Unavailable original backends fail without fallback.
+- `swarm --run-id ID --recovery-report` reads retained worker evidence for interrupted runs without replay or mutation.
+
+- Router and Python SDK can inspect durable swarm run summaries through `GET /swarm/runs/inspect` and `RouterClient.inspect_swarm_run`, using the Router authentication policy.
+
+- `herald swarm --run-id ID` opts into durable run and worker receipts; repeating a completed run retrieves its result without dispatch or merge replay. `--inspect` reads run status. Interrupted runs require reconciliation.
+
+- Worker callers may supply a stable attempt ID for durable receipts: completed results can be recovered without rerunning the provider, concurrent duplicate claims are blocked, and failed/interrupted worktrees are retained for reconciliation.
+
+- Isolated worker API can opt into one native-session correction for a successful response that leaves no changes. Explicit continuation uses the same worktree; Codex and Claude support native session selection.
+- Swarm dispatch excludes disabled and circuit-open CLI backends.
 ## [0.4.3] - 2026-11-03
 
 - **Third-party attribution:** Herald's model-provider layer (`herald/providers/`), CLI bridge and its prompts

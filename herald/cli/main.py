@@ -2562,6 +2562,11 @@ def cli_swarm(
     max_workers: int = typer.Option(6, "--max-workers", "-w", help="Number of parallel agent workers to dispatch"),
     limit: int = typer.Option(10, "--limit", "-n", help="Max tasks to execute in parallel"),
     model: str = typer.Option("codex-backup", "--model", "-m", help="Backend model for swarm workers"),
+    run_id: str | None = typer.Option(None, "--run-id", help="Stable durable run ID; repeat to retrieve its recorded result"),
+    inspect_run: bool = typer.Option(False, "--inspect", help="Inspect --run-id without dispatching workers"),
+    recovery_report: bool = typer.Option(False, "--recovery-report", help="Read worker recovery evidence for --run-id"),
+    reconcile: bool = typer.Option(False, "--reconcile", help="Close interrupted coordination for review without replay"),
+    reason: str = typer.Option("", "--reason", help="Reason for explicit reconciliation"),
 ):
     """Fast-Track Swarm: One-shot massive parallel execution across checklist tasks + automated N-way merge.
 
@@ -2572,6 +2577,31 @@ def cli_swarm(
 
     repo_root = _find_repo_root()
     checklist_path = (repo_root / checklist) if not Path(checklist).is_absolute() else Path(checklist)
+
+    if sum((inspect_run, recovery_report, reconcile)) > 1:
+        raise typer.BadParameter("Choose one of --inspect, --recovery-report or --reconcile")
+    if reconcile:
+        if not run_id or not reason.strip():
+            raise typer.BadParameter("--reconcile requires --run-id and --reason")
+        try:
+            result = SwarmOrchestrator(repo_path=repo_root).reconcile_run(run_id, reason=reason)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        print(json.dumps(result, indent=2))
+        return
+
+    if inspect_run or recovery_report:
+        from herald.router.swarm_attempts import AttemptStore
+        from herald.router.staging_zone import DEFAULT_DB_PATH
+        if not run_id:
+            raise typer.BadParameter("--inspect/--recovery-report requires --run-id")
+        if recovery_report:
+            from herald.router.fast_track import inspect_run_recovery
+            print(json.dumps(inspect_run_recovery(repo_root, run_id), indent=2))
+            return
+        key = json.dumps(["run", str(repo_root.resolve()), run_id])
+        print(json.dumps(AttemptStore.inspect(Path(DEFAULT_DB_PATH).with_suffix(".attempts.db"), key), indent=2))
+        return
 
     rprint(f"[dim]Project: {repo_root}[/dim]")
     if not checklist_path.exists():
@@ -2596,9 +2626,10 @@ def cli_swarm(
         max_tasks=limit,
         backend_model=model,
         on_progress=_progress,
+        run_id=run_id,
     )
 
-    rprint(f"\n[bold green][OK] Swarm Execution Complete![/bold green]")
+    rprint(f"\nSwarm status: {result.get('status', 'unknown')}")
     rprint(f"- Tasks Dispatched: {result.get('tasks_dispatched', 0)}")
     rprint(f"- Synthesis Outcome: {result.get('merge_result', {}).get('status', 'none')}")
 
